@@ -23,6 +23,14 @@ pub struct NewMemory {
     pub source_ref: Option<String>,
 }
 
+pub struct NewCorrection {
+    pub text: String,
+    pub kind: Option<String>,
+    pub actor: String,
+    pub source_type: String,
+    pub source_ref: Option<String>,
+}
+
 pub struct NewWorkspaceState {
     pub project_id: String,
     pub workspace_id: String,
@@ -56,9 +64,24 @@ pub struct MemorySource {
 }
 
 #[derive(Debug, Serialize)]
+pub struct MemoryRelation {
+    pub from_memory_id: String,
+    pub to_memory_id: String,
+    pub relation_type: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Serialize)]
 pub struct MemoryRecord {
     pub memory: Memory,
     pub sources: Vec<MemorySource>,
+    pub relations: Vec<MemoryRelation>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CorrectionResult {
+    pub previous: Memory,
+    pub replacement: MemoryRecord,
 }
 
 #[derive(Debug, Serialize)]
@@ -82,6 +105,7 @@ pub struct StoreStats {
     pub schema_version: i64,
     pub total: u64,
     pub active: u64,
+    pub superseded: u64,
     pub deleted: u64,
 }
 
@@ -110,19 +134,22 @@ impl Store {
 
     pub fn stats(&self) -> Result<StoreStats> {
         let schema_version = self.schema_version()?;
-        let (total, active, deleted): (i64, i64, i64) = self.connection.query_row(
-            "SELECT COUNT(*),\n\
-                    COALESCE(SUM(status = 'active'), 0),\n\
-                    COALESCE(SUM(status = 'deleted'), 0)\n\
-             FROM memories",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )?;
+        let (total, active, superseded, deleted): (i64, i64, i64, i64) =
+            self.connection.query_row(
+                "SELECT COUNT(*),\n\
+                        COALESCE(SUM(status = 'active'), 0),\n\
+                        COALESCE(SUM(status = 'superseded'), 0),\n\
+                        COALESCE(SUM(status = 'deleted'), 0)\n\
+                 FROM memories",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?;
 
         Ok(StoreStats {
             schema_version,
             total: total.try_into()?,
             active: active.try_into()?,
+            superseded: superseded.try_into()?,
             deleted: deleted.try_into()?,
         })
     }
@@ -140,29 +167,77 @@ impl Store {
         };
 
         let transaction = self.connection.transaction()?;
-        transaction.execute(
-            "INSERT INTO memories (\n\
-                 id, scope, project_id, kind, text, actor, status, created_at, updated_at\n\
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7, ?7)",
-            params![
-                id,
-                scope,
-                input.project_id,
-                input.kind,
-                input.text,
-                input.actor,
-                now
-            ],
-        )?;
-        transaction.execute(
-            "INSERT INTO memory_sources (\n\
-                 id, memory_id, source_type, locator, excerpt, created_at\n\
-             ) VALUES (?1, ?2, ?3, ?4, NULL, ?5)",
-            params![source_id, id, input.source_type, input.source_ref, now],
-        )?;
+        insert_memory(&transaction, &id, scope, &input, now)?;
+        insert_source(&transaction, &source_id, &id, &input, now)?;
         transaction.commit()?;
 
         self.memory_by_id(&id)
+    }
+
+    pub fn correct(
+        &mut self,
+        id_or_prefix: &str,
+        input: NewCorrection,
+    ) -> Result<CorrectionResult> {
+        let previous_id = self.resolve_id(id_or_prefix)?;
+        let previous = self.memory_by_id(&previous_id)?;
+        if previous.status != "active" {
+            bail!(
+                "memory {} is {}; only active memory can be corrected",
+                previous.id,
+                previous.status
+            );
+        }
+
+        let replacement_input = NewMemory {
+            text: input.text,
+            kind: input.kind.unwrap_or_else(|| previous.kind.clone()),
+            project_id: previous.project_id.clone(),
+            actor: input.actor,
+            source_type: input.source_type,
+            source_ref: input.source_ref,
+        };
+        validate_new_memory(&replacement_input)?;
+
+        let replacement_id = Uuid::now_v7().to_string();
+        let source_id = Uuid::now_v7().to_string();
+        let now = unix_millis()?;
+        let transaction = self.connection.transaction()?;
+        insert_memory(
+            &transaction,
+            &replacement_id,
+            &previous.scope,
+            &replacement_input,
+            now,
+        )?;
+        insert_source(
+            &transaction,
+            &source_id,
+            &replacement_id,
+            &replacement_input,
+            now,
+        )?;
+        let changed = transaction.execute(
+            "UPDATE memories\n\
+             SET status = 'superseded', updated_at = ?2\n\
+             WHERE id = ?1 AND status = 'active'",
+            params![previous_id, now],
+        )?;
+        if changed != 1 {
+            bail!("memory changed while correction was being applied");
+        }
+        transaction.execute(
+            "INSERT INTO memory_relations (\n\
+                 from_memory_id, to_memory_id, relation_type, created_at\n\
+             ) VALUES (?1, ?2, 'superseded_by', ?3)",
+            params![previous_id, replacement_id, now],
+        )?;
+        transaction.commit()?;
+
+        Ok(CorrectionResult {
+            previous: self.memory_by_id(&previous_id)?,
+            replacement: self.get(&replacement_id)?,
+        })
     }
 
     pub fn search(
@@ -187,13 +262,13 @@ impl Store {
         let id = self.resolve_id(id_or_prefix)?;
         let memory = self.memory_by_id(&id)?;
 
-        let mut statement = self.connection.prepare(
+        let mut source_statement = self.connection.prepare(
             "SELECT id, source_type, locator, excerpt, created_at\n\
              FROM memory_sources\n\
              WHERE memory_id = ?1\n\
              ORDER BY created_at, id",
         )?;
-        let rows = statement.query_map([&id], |row| {
+        let source_rows = source_statement.query_map([&id], |row| {
             Ok(MemorySource {
                 id: row.get(0)?,
                 source_type: row.get(1)?,
@@ -203,11 +278,34 @@ impl Store {
             })
         })?;
         let mut sources = Vec::new();
-        for row in rows {
+        for row in source_rows {
             sources.push(row?);
         }
 
-        Ok(MemoryRecord { memory, sources })
+        let mut relation_statement = self.connection.prepare(
+            "SELECT from_memory_id, to_memory_id, relation_type, created_at\n\
+             FROM memory_relations\n\
+             WHERE from_memory_id = ?1 OR to_memory_id = ?1\n\
+             ORDER BY created_at, from_memory_id, to_memory_id, relation_type",
+        )?;
+        let relation_rows = relation_statement.query_map([&id], |row| {
+            Ok(MemoryRelation {
+                from_memory_id: row.get(0)?,
+                to_memory_id: row.get(1)?,
+                relation_type: row.get(2)?,
+                created_at: row.get(3)?,
+            })
+        })?;
+        let mut relations = Vec::new();
+        for row in relation_rows {
+            relations.push(row?);
+        }
+
+        Ok(MemoryRecord {
+            memory,
+            sources,
+            relations,
+        })
     }
 
     pub fn forget(&self, id_or_prefix: &str) -> Result<String> {
@@ -392,6 +490,52 @@ impl Store {
     }
 }
 
+fn insert_memory(
+    connection: &Connection,
+    id: &str,
+    scope: &str,
+    input: &NewMemory,
+    now: i64,
+) -> Result<()> {
+    connection.execute(
+        "INSERT INTO memories (\n\
+             id, scope, project_id, kind, text, actor, status, created_at, updated_at\n\
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7, ?7)",
+        params![
+            id,
+            scope,
+            &input.project_id,
+            &input.kind,
+            &input.text,
+            &input.actor,
+            now
+        ],
+    )?;
+    Ok(())
+}
+
+fn insert_source(
+    connection: &Connection,
+    source_id: &str,
+    memory_id: &str,
+    input: &NewMemory,
+    now: i64,
+) -> Result<()> {
+    connection.execute(
+        "INSERT INTO memory_sources (\n\
+             id, memory_id, source_type, locator, excerpt, created_at\n\
+         ) VALUES (?1, ?2, ?3, ?4, NULL, ?5)",
+        params![
+            source_id,
+            memory_id,
+            &input.source_type,
+            &input.source_ref,
+            now
+        ],
+    )?;
+    Ok(())
+}
+
 fn validate_new_memory(input: &NewMemory) -> Result<()> {
     if input.text.trim().is_empty() {
         bail!("memory text cannot be empty");
@@ -497,7 +641,7 @@ fn unix_millis() -> Result<i64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{NewMemory, NewWorkspaceState, Store};
+    use super::{NewCorrection, NewMemory, NewWorkspaceState, Store};
     use uuid::Uuid;
 
     #[test]
@@ -580,6 +724,79 @@ mod tests {
             .recall("publication preference", Some(project), 10)
             .expect("broad recall");
         assert_eq!(recalled.len(), 2);
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn correction_supersedes_without_losing_history() {
+        let path = test_path();
+        let mut store = Store::open(&path).expect("open test store");
+        let project = "github.com/nijaru/mem";
+
+        let original = store
+            .remember(NewMemory {
+                text: "alpha policy remains active".to_owned(),
+                kind: "decision".to_owned(),
+                project_id: Some(project.to_owned()),
+                actor: "user".to_owned(),
+                source_type: "test".to_owned(),
+                source_ref: Some("original".to_owned()),
+            })
+            .expect("store original memory");
+
+        let result = store
+            .correct(
+                &original.id,
+                NewCorrection {
+                    text: "beta policy replaces alpha".to_owned(),
+                    kind: None,
+                    actor: "user".to_owned(),
+                    source_type: "test".to_owned(),
+                    source_ref: Some("correction".to_owned()),
+                },
+            )
+            .expect("correct memory");
+
+        assert_eq!(result.previous.status, "superseded");
+        assert_eq!(result.replacement.memory.status, "active");
+        assert_eq!(result.replacement.memory.kind, "decision");
+        assert_eq!(
+            result.replacement.memory.project_id.as_deref(),
+            Some(project)
+        );
+        assert!(
+            result
+                .replacement
+                .relations
+                .iter()
+                .any(|relation| relation.from_memory_id == original.id
+                    && relation.to_memory_id == result.replacement.memory.id
+                    && relation.relation_type == "superseded_by")
+        );
+
+        let original_record = store.get(&original.id).expect("read original memory");
+        assert_eq!(original_record.memory.status, "superseded");
+        assert_eq!(original_record.relations.len(), 1);
+        assert!(
+            store
+                .search("active", Some(project), 10)
+                .expect("search superseded wording")
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .search("beta", Some(project), 10)
+                .expect("search replacement")
+                .len(),
+            1
+        );
+
+        let stats = store.stats().expect("read stats");
+        assert_eq!(stats.total, 2);
+        assert_eq!(stats.active, 1);
+        assert_eq!(stats.superseded, 1);
+        assert_eq!(stats.deleted, 0);
 
         cleanup(&path);
     }

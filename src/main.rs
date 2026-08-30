@@ -10,7 +10,9 @@ use serde::Serialize;
 use usage::{Args, Cli, Subcommands};
 
 use crate::project::ProjectContext;
-use crate::store::{Memory, MemorySource, NewMemory, NewWorkspaceState, Store, WorkspaceState};
+use crate::store::{
+    Memory, MemorySource, NewCorrection, NewMemory, NewWorkspaceState, Store, WorkspaceState,
+};
 
 #[derive(Cli)]
 #[usage(bin = "mem", version, arg_required_else_help, unknown_flags = "error")]
@@ -35,6 +37,7 @@ enum Command {
     State(State),
     Context(ContextCommand),
     Remember(Remember),
+    Correct(Correct),
     Search(Search),
     Get(Get),
     Forget(Forget),
@@ -176,6 +179,32 @@ struct Remember {
     source_ref: Option<String>,
 }
 
+/// Replace one active memory while preserving the superseded record and provenance.
+#[derive(Args)]
+struct Correct {
+    /// Full memory ID or an unambiguous ID prefix.
+    id: String,
+
+    /// Replacement memory text.
+    text: String,
+
+    /// Override the existing memory kind.
+    #[usage(long)]
+    kind: Option<String>,
+
+    /// Actor that established the correction, such as user or agent.
+    #[usage(long)]
+    actor: Option<String>,
+
+    /// Provenance type for the correction, such as cli, pi-session, git, file, or url.
+    #[usage(long)]
+    source_type: Option<String>,
+
+    /// Optional source locator or stable reference for the correction.
+    #[usage(long)]
+    source_ref: Option<String>,
+}
+
 /// Search active semantic memory with SQLite FTS5.
 #[derive(Args)]
 struct Search {
@@ -195,7 +224,7 @@ struct Search {
     limit: Option<usize>,
 }
 
-/// Read one memory and its provenance.
+/// Read one memory, provenance, and semantic relations.
 #[derive(Args)]
 struct Get {
     /// Full memory ID or an unambiguous ID prefix.
@@ -215,6 +244,7 @@ struct StatusOutput {
     schema_version: i64,
     total: u64,
     active: u64,
+    superseded: u64,
     deleted: u64,
 }
 
@@ -294,6 +324,7 @@ fn run(cli: MemCli) -> Result<()> {
                 schema_version: stats.schema_version,
                 total: stats.total,
                 active: stats.active,
+                superseded: stats.superseded,
                 deleted: stats.deleted,
             };
             if cli.json {
@@ -302,8 +333,8 @@ fn run(cli: MemCli) -> Result<()> {
                 println!("database: {}", output.database);
                 println!("schema: {}", output.schema_version);
                 println!(
-                    "memories: {} active / {} total",
-                    output.active, output.total
+                    "memories: {} active / {} superseded / {} deleted / {} total",
+                    output.active, output.superseded, output.deleted, output.total
                 );
             }
         }
@@ -429,6 +460,32 @@ fn run(cli: MemCli) -> Result<()> {
                 println!("{}\t{}\t{}", memory.id, memory.kind, memory.text);
             }
         }
+        Command::Correct(command) => {
+            let result = store.correct(
+                &command.id,
+                NewCorrection {
+                    text: command.text,
+                    kind: command.kind,
+                    actor: command.actor.unwrap_or_else(|| "user".to_owned()),
+                    source_type: command.source_type.unwrap_or_else(|| "cli".to_owned()),
+                    source_ref: command.source_ref,
+                },
+            )?;
+            if cli.json {
+                print_json(&result)?;
+            } else {
+                println!(
+                    "corrected {} -> {}",
+                    result.previous.id, result.replacement.memory.id
+                );
+                println!(
+                    "{}\t{}\t{}",
+                    result.replacement.memory.id,
+                    result.replacement.memory.kind,
+                    result.replacement.memory.text
+                );
+            }
+        }
         Command::Search(command) => {
             let project_id = memory_project(command.project.as_deref(), command.global_memory)?;
             let hits = store.search(
@@ -469,6 +526,12 @@ fn run(cli: MemCli) -> Result<()> {
                 for source in record.sources {
                     let locator = source.locator.as_deref().unwrap_or("-");
                     println!("source: {} {locator}", source.source_type);
+                }
+                for relation in record.relations {
+                    println!(
+                        "relation: {} {} -> {}",
+                        relation.relation_type, relation.from_memory_id, relation.to_memory_id
+                    );
                 }
             }
         }
