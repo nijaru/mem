@@ -171,46 +171,16 @@ impl Store {
         project_id: Option<&str>,
         limit: usize,
     ) -> Result<Vec<SearchHit>> {
-        let query = fts_query(query)?;
-        let limit = i64::try_from(limit)?;
+        self.search_fts(&fts_query(query, " AND ")?, project_id, limit)
+    }
 
-        let mut hits = Vec::new();
-        if let Some(project_id) = project_id {
-            let mut statement = self.connection.prepare(
-                "SELECT m.id, m.scope, m.project_id, m.kind, m.text, m.actor, m.status,\n\
-                        m.created_at, m.updated_at, m.deleted_at, bm25(memories_fts)\n\
-                 FROM memories_fts\n\
-                 JOIN memories AS m ON m.rowid = memories_fts.rowid\n\
-                 WHERE memories_fts MATCH ?1\n\
-                   AND m.status = 'active'\n\
-                   AND (m.project_id IS NULL OR m.project_id = ?2)\n\
-                 ORDER BY bm25(memories_fts), m.updated_at DESC\n\
-                 LIMIT ?3",
-            )?;
-            let rows =
-                statement.query_map(params![query, project_id, limit], search_hit_from_row)?;
-            for row in rows {
-                hits.push(row?);
-            }
-        } else {
-            let mut statement = self.connection.prepare(
-                "SELECT m.id, m.scope, m.project_id, m.kind, m.text, m.actor, m.status,\n\
-                        m.created_at, m.updated_at, m.deleted_at, bm25(memories_fts)\n\
-                 FROM memories_fts\n\
-                 JOIN memories AS m ON m.rowid = memories_fts.rowid\n\
-                 WHERE memories_fts MATCH ?1\n\
-                   AND m.status = 'active'\n\
-                   AND m.project_id IS NULL\n\
-                 ORDER BY bm25(memories_fts), m.updated_at DESC\n\
-                 LIMIT ?2",
-            )?;
-            let rows = statement.query_map(params![query, limit], search_hit_from_row)?;
-            for row in rows {
-                hits.push(row?);
-            }
-        }
-
-        Ok(hits)
+    pub fn recall(
+        &self,
+        query: &str,
+        project_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<SearchHit>> {
+        self.search_fts(&fts_query(query, " OR ")?, project_id, limit)
     }
 
     pub fn get(&self, id_or_prefix: &str) -> Result<MemoryRecord> {
@@ -315,6 +285,53 @@ impl Store {
             "DELETE FROM workspace_state WHERE project_id = ?1 AND workspace_id = ?2",
             params![project_id, workspace_id],
         )? > 0)
+    }
+
+    fn search_fts(
+        &self,
+        query: &str,
+        project_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<SearchHit>> {
+        let limit = i64::try_from(limit)?;
+        let mut hits = Vec::new();
+
+        if let Some(project_id) = project_id {
+            let mut statement = self.connection.prepare(
+                "SELECT m.id, m.scope, m.project_id, m.kind, m.text, m.actor, m.status,\n\
+                        m.created_at, m.updated_at, m.deleted_at, bm25(memories_fts)\n\
+                 FROM memories_fts\n\
+                 JOIN memories AS m ON m.rowid = memories_fts.rowid\n\
+                 WHERE memories_fts MATCH ?1\n\
+                   AND m.status = 'active'\n\
+                   AND (m.project_id IS NULL OR m.project_id = ?2)\n\
+                 ORDER BY bm25(memories_fts), m.updated_at DESC\n\
+                 LIMIT ?3",
+            )?;
+            let rows =
+                statement.query_map(params![query, project_id, limit], search_hit_from_row)?;
+            for row in rows {
+                hits.push(row?);
+            }
+        } else {
+            let mut statement = self.connection.prepare(
+                "SELECT m.id, m.scope, m.project_id, m.kind, m.text, m.actor, m.status,\n\
+                        m.created_at, m.updated_at, m.deleted_at, bm25(memories_fts)\n\
+                 FROM memories_fts\n\
+                 JOIN memories AS m ON m.rowid = memories_fts.rowid\n\
+                 WHERE memories_fts MATCH ?1\n\
+                   AND m.status = 'active'\n\
+                   AND m.project_id IS NULL\n\
+                 ORDER BY bm25(memories_fts), m.updated_at DESC\n\
+                 LIMIT ?2",
+            )?;
+            let rows = statement.query_map(params![query, limit], search_hit_from_row)?;
+            for row in rows {
+                hits.push(row?);
+            }
+        }
+
+        Ok(hits)
     }
 
     fn migrate(&self) -> Result<()> {
@@ -460,7 +477,7 @@ fn workspace_state_from_row(row: &Row<'_>) -> rusqlite::Result<WorkspaceState> {
     })
 }
 
-fn fts_query(input: &str) -> Result<String> {
+fn fts_query(input: &str, operator: &str) -> Result<String> {
     let terms: Vec<String> = input
         .split_whitespace()
         .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
@@ -468,7 +485,7 @@ fn fts_query(input: &str) -> Result<String> {
     if terms.is_empty() {
         bail!("search query cannot be empty");
     }
-    Ok(terms.join(" AND "))
+    Ok(terms.join(operator))
 }
 
 fn unix_millis() -> Result<i64> {
@@ -480,12 +497,12 @@ fn unix_millis() -> Result<i64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{NewWorkspaceState, Store};
+    use super::{NewMemory, NewWorkspaceState, Store};
     use uuid::Uuid;
 
     #[test]
     fn workspace_state_round_trips_and_clears() {
-        let path = std::env::temp_dir().join(format!("mem-test-{}.db", Uuid::now_v7()));
+        let path = test_path();
         let store = Store::open(&path).expect("open test store");
 
         assert!(
@@ -523,8 +540,56 @@ mod tests {
                 .is_none()
         );
 
-        drop(store);
-        let _ = std::fs::remove_file(&path);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn recall_is_broader_than_explicit_search() {
+        let path = test_path();
+        let mut store = Store::open(&path).expect("open test store");
+        let project = "github.com/nijaru/mem";
+
+        store
+            .remember(NewMemory {
+                text: "publication notification handoff".to_owned(),
+                kind: "fact".to_owned(),
+                project_id: Some(project.to_owned()),
+                actor: "agent".to_owned(),
+                source_type: "test".to_owned(),
+                source_ref: None,
+            })
+            .expect("store project memory");
+        store
+            .remember(NewMemory {
+                text: "user prefers concise memory tooling".to_owned(),
+                kind: "preference".to_owned(),
+                project_id: None,
+                actor: "user".to_owned(),
+                source_type: "test".to_owned(),
+                source_ref: None,
+            })
+            .expect("store global memory");
+
+        assert!(
+            store
+                .search("publication preference", Some(project), 10)
+                .expect("strict search")
+                .is_empty()
+        );
+        let recalled = store
+            .recall("publication preference", Some(project), 10)
+            .expect("broad recall");
+        assert_eq!(recalled.len(), 2);
+
+        cleanup(&path);
+    }
+
+    fn test_path() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("mem-test-{}.db", Uuid::now_v7()))
+    }
+
+    fn cleanup(path: &std::path::Path) {
+        let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(path.with_extension("db-shm"));
         let _ = std::fs::remove_file(path.with_extension("db-wal"));
     }

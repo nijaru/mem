@@ -10,7 +10,9 @@ use serde::Serialize;
 use usage::{Args, Cli, Subcommands};
 
 use crate::project::ProjectContext;
-use crate::store::{NewMemory, NewWorkspaceState, Store, WorkspaceState};
+use crate::store::{
+    Memory, MemorySource, NewMemory, NewWorkspaceState, Store, WorkspaceState,
+};
 
 #[derive(Cli)]
 #[usage(bin = "mem", version, arg_required_else_help, unknown_flags = "error")]
@@ -33,6 +35,7 @@ enum Command {
     Status(Status),
     Project(Project),
     State(State),
+    Context(ContextCommand),
     Remember(Remember),
     Search(Search),
     Get(Get),
@@ -125,6 +128,25 @@ struct StateClear {
     workspace: Option<String>,
 }
 
+/// Build adapter-facing context from state and broad semantic recall.
+#[derive(Args)]
+struct ContextCommand {
+    /// Prompt or query to recall relevant memory for.
+    query: String,
+
+    /// Override the current project identifier.
+    #[usage(long)]
+    project: Option<String>,
+
+    /// Override the current workspace identifier.
+    #[usage(long)]
+    workspace: Option<String>,
+
+    /// Maximum number of semantic memories.
+    #[usage(short = 'n', long)]
+    limit: Option<usize>,
+}
+
 /// Store one durable semantic memory.
 #[derive(Args)]
 struct Remember {
@@ -203,6 +225,19 @@ struct ClearStateOutput<'a> {
     project_id: &'a str,
     workspace_id: &'a str,
     cleared: bool,
+}
+
+#[derive(Serialize)]
+struct ContextOutput {
+    project: Option<ProjectContext>,
+    state: Option<WorkspaceState>,
+    memories: Vec<ContextMemory>,
+}
+
+#[derive(Serialize)]
+struct ContextMemory {
+    memory: Memory,
+    sources: Vec<MemorySource>,
 }
 
 fn main() {
@@ -347,6 +382,41 @@ fn run(cli: MemCli) -> Result<()> {
                 }
             }
         },
+        Command::Context(command) => {
+            let project = optional_project_context(
+                command.project.as_deref(),
+                command.workspace.as_deref(),
+            )?;
+            let state = if let Some(project) = project.as_ref() {
+                store.workspace_state(&project.project_id, &project.workspace_id)?
+            } else {
+                None
+            };
+            let project_id = project.as_ref().map(|project| project.project_id.as_str());
+            let hits = store.recall(
+                &command.query,
+                project_id,
+                command.limit.unwrap_or(10).clamp(1, 100),
+            )?;
+            let mut memories = Vec::with_capacity(hits.len());
+            for hit in hits {
+                let record = store.get(&hit.memory.id)?;
+                memories.push(ContextMemory {
+                    memory: record.memory,
+                    sources: record.sources,
+                });
+            }
+            let output = ContextOutput {
+                project,
+                state,
+                memories,
+            };
+            if cli.json {
+                print_json(&output)?;
+            } else {
+                print_context(&output);
+            }
+        }
         Command::Remember(command) => {
             let project_id = memory_project(command.project.as_deref(), command.global_memory)?;
             let memory = store.remember(NewMemory {
@@ -419,8 +489,19 @@ fn run(cli: MemCli) -> Result<()> {
     Ok(())
 }
 
+fn optional_project_context(
+    project: Option<&str>,
+    workspace: Option<&str>,
+) -> Result<Option<ProjectContext>> {
+    let context = ProjectContext::detect(project, workspace)?;
+    if context.is_none() && workspace.is_some() {
+        bail!("--workspace requires a detected or explicit project");
+    }
+    Ok(context)
+}
+
 fn project_context(project: Option<&str>, workspace: Option<&str>) -> Result<ProjectContext> {
-    ProjectContext::detect(project, workspace)?
+    optional_project_context(project, workspace)?
         .context("no project detected; run inside a Git repository or pass --project")
 }
 
@@ -440,6 +521,48 @@ fn memory_project(explicit: Option<&str>, global: bool) -> Result<Option<String>
     }
 
     Ok(ProjectContext::detect(None, None)?.map(|context| context.project_id))
+}
+
+fn print_context(output: &ContextOutput) {
+    if let Some(project) = &output.project {
+        println!("project: {}", project.project_id);
+        println!("workspace: {}", project.workspace_id);
+    } else {
+        println!("project: global");
+    }
+
+    if let Some(state) = &output.state {
+        println!("state:");
+        if let Some(session) = &state.last_session_id {
+            println!("  session: {session}");
+        }
+        if let Some(goal) = &state.active_goal {
+            println!("  goal: {goal}");
+        }
+        if let Some(task) = &state.active_task_ref {
+            println!("  task: {task}");
+        }
+        if let Some(checkpoint) = &state.checkpoint {
+            println!("  checkpoint: {checkpoint}");
+        }
+    }
+
+    println!("memories:");
+    for item in &output.memories {
+        let scope = item
+            .memory
+            .project_id
+            .as_deref()
+            .map_or("global", |project| project);
+        println!(
+            "  {}\t{}\t{}\t{}",
+            item.memory.id, item.memory.kind, scope, item.memory.text
+        );
+        for source in &item.sources {
+            let locator = source.locator.as_deref().unwrap_or("-");
+            println!("    source: {} {locator}", source.source_type);
+        }
+    }
 }
 
 fn print_workspace_state(state: &WorkspaceState) {
