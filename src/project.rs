@@ -133,7 +133,10 @@ mod tests {
         for (input, expected) in [
             ("git@github.com:nijaru/mem.git", "github.com/nijaru/mem"),
             ("https://github.com/nijaru/mem.git", "github.com/nijaru/mem"),
-            ("ssh://git@github.com/nijaru/mem.git", "github.com/nijaru/mem"),
+            (
+                "ssh://git@github.com/nijaru/mem.git",
+                "github.com/nijaru/mem",
+            ),
             ("https://GitHub.COM/nijaru/mem/", "github.com/nijaru/mem"),
         ] {
             assert_eq!(normalize_remote(input), expected);

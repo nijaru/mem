@@ -201,11 +201,9 @@ fn run(cli: MemCli) -> Result<()> {
             }
         }
         Command::Project(command) => {
-            let context = ProjectContext::detect(
-                command.project.as_deref(),
-                command.workspace.as_deref(),
-            )?
-            .context("no project detected; run inside a Git repository or pass --project")?;
+            let context =
+                ProjectContext::detect(command.project.as_deref(), command.workspace.as_deref())?
+                    .context("no project detected; run inside a Git repository or pass --project")?;
             if cli.json {
                 print_json(&context)?;
             } else {
@@ -220,8 +218,7 @@ fn run(cli: MemCli) -> Result<()> {
             }
         }
         Command::Remember(command) => {
-            let project_id =
-                memory_project(command.project.as_deref(), command.global_memory)?;
+            let project_id = memory_project(command.project.as_deref(), command.global_memory)?;
             let memory = store.remember(NewMemory {
                 text: command.text,
                 kind: command.kind.unwrap_or_else(|| "fact".to_owned()),
@@ -237,8 +234,7 @@ fn run(cli: MemCli) -> Result<()> {
             }
         }
         Command::Search(command) => {
-            let project_id =
-                memory_project(command.project.as_deref(), command.global_memory)?;
+            let project_id = memory_project(command.project.as_deref(), command.global_memory)?;
             let hits = store.search(
                 &command.query,
                 project_id.as_deref(),
