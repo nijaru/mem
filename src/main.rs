@@ -11,12 +11,7 @@ use usage::{Args, Cli, Subcommands};
 use crate::store::{NewMemory, Store};
 
 #[derive(Cli)]
-#[usage(
-    bin = "mem",
-    version,
-    arg_required_else_help,
-    unknown_flags = "error"
-)]
+#[usage(bin = "mem", version, arg_required_else_help, unknown_flags = "error")]
 struct MemCli {
     /// Emit machine-readable JSON.
     #[usage(long, global)]
@@ -130,22 +125,17 @@ fn parse_cli(argv: &[String]) -> Option<MemCli> {
     match MemCli::parse_from(&words) {
         Ok(cli) => Some(cli),
         Err(usage::Error::Help { cmd, long }) => {
-            if let Some(page) = usage::help::render_styled(
-                MemCli::spec(),
-                cmd,
-                long,
-                usage::help::Style::auto(),
-            ) {
+            if let Some(page) =
+                usage::help::render_styled(MemCli::spec(), cmd, long, usage::help::Style::auto())
+            {
                 print!("{page}");
             }
             None
         }
         Err(usage::Error::HelpAll { cmd }) => {
-            if let Some(page) = usage::help::render_all_styled(
-                MemCli::spec(),
-                cmd,
-                usage::help::Style::auto(),
-            ) {
+            if let Some(page) =
+                usage::help::render_all_styled(MemCli::spec(), cmd, usage::help::Style::auto())
+            {
                 print!("{page}");
             }
             None
@@ -181,7 +171,10 @@ fn run(cli: MemCli) -> Result<()> {
             } else {
                 println!("database: {}", output.database);
                 println!("schema: {}", output.schema_version);
-                println!("memories: {} active / {} total", output.active, output.total);
+                println!(
+                    "memories: {} active / {} total",
+                    output.active, output.total
+                );
             }
         }
         Command::Remember(command) => {
@@ -261,7 +254,8 @@ fn database_path(override_path: Option<&Path>) -> Result<PathBuf> {
         return Ok(PathBuf::from(home).join("memory.db"));
     }
 
-    let data_dir = dirs::data_local_dir().context("could not determine the local data directory")?;
+    let data_dir =
+        dirs::data_local_dir().context("could not determine the local data directory")?;
     Ok(data_dir.join("mem").join("memory.db"))
 }
 
