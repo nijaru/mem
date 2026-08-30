@@ -80,7 +80,9 @@ impl Store {
         validate_episode(&input)?;
 
         if let Some(existing) = self.episode_by_source(&input.source_type, &input.source_ref)? {
-            if existing.project_id != input.project_id || existing.workspace_id != input.workspace_id {
+            if existing.project_id != input.project_id
+                || existing.workspace_id != input.workspace_id
+            {
                 bail!(
                     "episode source {}:{} is already bound to a different project/workspace",
                     input.source_type,
@@ -233,10 +235,8 @@ impl Store {
                  ORDER BY bm25(episode_entries_fts), e.started_at DESC, ee.ordinal\n\
                  LIMIT ?3",
             )?;
-            let rows = statement.query_map(
-                params![query, project_id, limit],
-                history_hit_from_row,
-            )?;
+            let rows =
+                statement.query_map(params![query, project_id, limit], history_hit_from_row)?;
             for row in rows {
                 hits.push(row?);
             }
