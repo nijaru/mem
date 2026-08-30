@@ -561,7 +561,7 @@ mod tests {
             .expect("store project memory");
         store
             .remember(NewMemory {
-                text: "user prefers concise memory tooling".to_owned(),
+                text: "user preference favors concise memory tooling".to_owned(),
                 kind: "preference".to_owned(),
                 project_id: None,
                 actor: "user".to_owned(),
