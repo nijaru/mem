@@ -67,7 +67,10 @@ pub struct StoreStats {
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
-        if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
             fs::create_dir_all(parent)
                 .with_context(|| format!("create data directory {}", parent.display()))?;
         }
@@ -164,7 +167,8 @@ impl Store {
                  ORDER BY bm25(memories_fts), m.updated_at DESC\n\
                  LIMIT ?3",
             )?;
-            let rows = statement.query_map(params![query, project_id, limit], search_hit_from_row)?;
+            let rows =
+                statement.query_map(params![query, project_id, limit], search_hit_from_row)?;
             for row in rows {
                 hits.push(row?);
             }
@@ -274,7 +278,8 @@ impl Store {
              ORDER BY CASE WHEN id = ?1 THEN 0 ELSE 1 END, id\n\
              LIMIT 2",
         )?;
-        let rows = statement.query_map(params![candidate, prefix], |row| row.get::<_, String>(0))?;
+        let rows =
+            statement.query_map(params![candidate, prefix], |row| row.get::<_, String>(0))?;
         let ids: Vec<String> = rows.collect::<rusqlite::Result<_>>()?;
 
         match ids.as_slice() {
