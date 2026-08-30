@@ -1,0 +1,28 @@
+[package]
+name = "mem-cli"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+description = "Local memory CLI for agents"
+license = "MIT"
+repository = "https://github.com/nijaru/mem"
+readme = "README.md"
+keywords = ["agent", "memory", "cli", "sqlite", "ai"]
+categories = ["command-line-utilities", "database"]
+
+[[bin]]
+name = "mem"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+dirs = "6"
+rusqlite = { version = "=0.40.2", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+usage = { package = "usage-rs", version = "=6.6.0" }
+uuid = { version = "1.26", features = ["v7"] }
+
+[profile.release]
+lto = "thin"
+strip = true
