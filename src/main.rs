@@ -1,13 +1,15 @@
+mod project;
 mod store;
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use usage::{Args, Cli, Subcommands};
 
+use crate::project::ProjectContext;
 use crate::store::{NewMemory, Store};
 
 #[derive(Cli)]
@@ -29,6 +31,7 @@ struct MemCli {
 enum Command {
     Init(Init),
     Status(Status),
+    Project(Project),
     Remember(Remember),
     Search(Search),
     Get(Get),
@@ -43,6 +46,18 @@ struct Init;
 #[derive(Args)]
 struct Status;
 
+/// Show the detected project and workspace identity.
+#[derive(Args)]
+struct Project {
+    /// Override the project identifier.
+    #[usage(long)]
+    project: Option<String>,
+
+    /// Override the workspace identifier.
+    #[usage(long)]
+    workspace: Option<String>,
+}
+
 /// Store one durable semantic memory.
 #[derive(Args)]
 struct Remember {
@@ -53,9 +68,13 @@ struct Remember {
     #[usage(long)]
     kind: Option<String>,
 
-    /// Project identifier. Omit for global memory.
+    /// Override the current project identifier.
     #[usage(long)]
     project: Option<String>,
+
+    /// Store user-wide memory instead of project memory.
+    #[usage(long = "global")]
+    global_memory: bool,
 
     /// Actor that established the memory, such as user or agent.
     #[usage(long)]
@@ -76,9 +95,13 @@ struct Search {
     /// Search query.
     query: String,
 
-    /// Include global memory plus memory for this project.
+    /// Override the current project identifier.
     #[usage(long)]
     project: Option<String>,
+
+    /// Search only user-wide global memory.
+    #[usage(long = "global")]
+    global_memory: bool,
 
     /// Maximum number of results.
     #[usage(short = 'n', long)]
@@ -177,11 +200,32 @@ fn run(cli: MemCli) -> Result<()> {
                 );
             }
         }
+        Command::Project(command) => {
+            let context = ProjectContext::detect(
+                command.project.as_deref(),
+                command.workspace.as_deref(),
+            )?
+            .context("no project detected; run inside a Git repository or pass --project")?;
+            if cli.json {
+                print_json(&context)?;
+            } else {
+                println!("project: {}", context.project_id);
+                println!("workspace: {}", context.workspace_id);
+                if let Some(root) = &context.root {
+                    println!("root: {}", root.display());
+                }
+                if let Some(remote) = &context.remote {
+                    println!("remote: {remote}");
+                }
+            }
+        }
         Command::Remember(command) => {
+            let project_id =
+                memory_project(command.project.as_deref(), command.global_memory)?;
             let memory = store.remember(NewMemory {
                 text: command.text,
                 kind: command.kind.unwrap_or_else(|| "fact".to_owned()),
-                project_id: command.project,
+                project_id,
                 actor: command.actor.unwrap_or_else(|| "user".to_owned()),
                 source_type: command.source_type.unwrap_or_else(|| "cli".to_owned()),
                 source_ref: command.source_ref,
@@ -193,16 +237,22 @@ fn run(cli: MemCli) -> Result<()> {
             }
         }
         Command::Search(command) => {
+            let project_id =
+                memory_project(command.project.as_deref(), command.global_memory)?;
             let hits = store.search(
                 &command.query,
-                command.project.as_deref(),
+                project_id.as_deref(),
                 command.limit.unwrap_or(10).clamp(1, 100),
             )?;
             if cli.json {
                 print_json(&hits)?;
             } else {
                 for hit in hits {
-                    let scope = hit.memory.project_id.as_deref().unwrap_or("global");
+                    let scope = hit
+                        .memory
+                        .project_id
+                        .as_deref()
+                        .map_or("global", |project| project);
                     println!(
                         "{}\t{}\t{}\t{}",
                         hit.memory.id, hit.memory.kind, scope, hit.memory.text
@@ -241,6 +291,24 @@ fn run(cli: MemCli) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn memory_project(explicit: Option<&str>, global: bool) -> Result<Option<String>> {
+    if global && explicit.is_some() {
+        bail!("--global conflicts with --project");
+    }
+    if global {
+        return Ok(None);
+    }
+    if let Some(project) = explicit {
+        let project = project.trim();
+        if project.is_empty() {
+            bail!("project identifier cannot be empty");
+        }
+        return Ok(Some(project.to_owned()));
+    }
+
+    Ok(ProjectContext::detect(None, None)?.map(|context| context.project_id))
 }
 
 fn database_path(override_path: Option<&Path>) -> Result<PathBuf> {
