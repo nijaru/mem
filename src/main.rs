@@ -1,3 +1,4 @@
+mod episode;
 mod project;
 mod store;
 
@@ -9,6 +10,7 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use usage::{Args, Cli, Subcommands};
 
+use crate::episode::{NewEpisode, NewEpisodeEntry};
 use crate::project::ProjectContext;
 use crate::store::{
     Memory, MemorySource, NewCorrection, NewMemory, NewWorkspaceState, Store, WorkspaceState,
@@ -41,6 +43,8 @@ enum Command {
     Search(Search),
     Get(Get),
     Forget(Forget),
+    Episode(EpisodeCommand),
+    History(History),
 }
 
 /// Initialize the local memory database.
@@ -236,6 +240,122 @@ struct Get {
 struct Forget {
     /// Full memory ID or an unambiguous ID prefix.
     id: String,
+}
+
+/// Record and inspect episodic source history.
+#[derive(Args)]
+struct EpisodeCommand {
+    #[usage(subcommand)]
+    command: EpisodeSubcommand,
+}
+
+#[derive(Subcommands)]
+enum EpisodeSubcommand {
+    Create(EpisodeCreate),
+    Record(EpisodeRecordCommand),
+    End(EpisodeEnd),
+    Get(EpisodeGet),
+}
+
+/// Create or resolve an episode for one original source/session.
+#[derive(Args)]
+struct EpisodeCreate {
+    /// Stable source reference for the original session or event stream.
+    source_ref: String,
+
+    /// Source type, such as pi-session, codex-session, or transcript.
+    #[usage(long)]
+    source_type: Option<String>,
+
+    /// Override the current project identifier.
+    #[usage(long)]
+    project: Option<String>,
+
+    /// Override the current workspace identifier.
+    #[usage(long)]
+    workspace: Option<String>,
+
+    /// Store an unscoped/global episode instead of detecting a project.
+    #[usage(long = "global")]
+    global_episode: bool,
+
+    /// Source start timestamp in Unix milliseconds.
+    #[usage(long)]
+    started_at: Option<i64>,
+
+    /// Opaque valid JSON metadata retained with the episode.
+    #[usage(long)]
+    metadata_json: Option<String>,
+}
+
+/// Add or refresh one searchable entry with an exact source backreference.
+#[derive(Args)]
+struct EpisodeRecordCommand {
+    /// Full episode ID or an unambiguous ID prefix.
+    episode: String,
+
+    /// Stable source-local locator for this entry.
+    source_ref: String,
+
+    /// Searchable textual content for this entry.
+    text: String,
+
+    /// Optional explicit source order; otherwise append after the current maximum.
+    #[usage(long)]
+    ordinal: Option<i64>,
+
+    /// Entry kind, such as message, tool, summary, or event.
+    #[usage(long)]
+    kind: Option<String>,
+
+    /// Optional conversational role such as user or assistant.
+    #[usage(long)]
+    role: Option<String>,
+
+    /// Source occurrence timestamp in Unix milliseconds.
+    #[usage(long)]
+    occurred_at: Option<i64>,
+
+    /// Opaque valid JSON metadata retained with the source entry.
+    #[usage(long)]
+    metadata_json: Option<String>,
+}
+
+/// Mark an episode complete.
+#[derive(Args)]
+struct EpisodeEnd {
+    /// Full episode ID or an unambiguous ID prefix.
+    episode: String,
+
+    /// End timestamp in Unix milliseconds; defaults to now.
+    #[usage(long)]
+    ended_at: Option<i64>,
+}
+
+/// Read one episode and its indexed source entries.
+#[derive(Args)]
+struct EpisodeGet {
+    /// Full episode ID or an unambiguous ID prefix.
+    episode: String,
+}
+
+/// Search indexed episodic history while preserving original-source references.
+#[derive(Args)]
+struct History {
+    /// Lexical history query; all terms must match an entry.
+    query: String,
+
+    /// Override the current project identifier.
+    #[usage(long)]
+    project: Option<String>,
+
+    /// Search only unscoped/global episode history.
+    #[usage(long = "global")]
+    global_history: bool,
+
+    /// Maximum number of matching source entries.
+    #[usage(short = 'n', long)]
+    limit: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -543,6 +663,90 @@ fn run(cli: MemCli) -> Result<()> {
                 println!("forgot {id}");
             }
         }
+        Command::Episode(command) => match command.command {
+            EpisodeSubcommand::Create(command) => {
+                let context = episode_context(
+                    command.project.as_deref(),
+                    command.workspace.as_deref(),
+                    command.global_episode,
+                )?;
+                let episode = store.ensure_episode(NewEpisode {
+                    project_id: context.as_ref().map(|value| value.project_id.clone()),
+                    workspace_id: context.as_ref().map(|value| value.workspace_id.clone()),
+                    source_type: command.source_type.unwrap_or_else(|| "session".to_owned()),
+                    source_ref: command.source_ref,
+                    started_at: command.started_at,
+                    metadata_json: command.metadata_json,
+                })?;
+                if cli.json {
+                    print_json(&episode)?;
+                } else {
+                    println!("{}\t{}\t{}", episode.id, episode.source_type, episode.source_ref);
+                }
+            }
+            EpisodeSubcommand::Record(command) => {
+                let entry = store.record_episode_entry(
+                    &command.episode,
+                    NewEpisodeEntry {
+                        source_ref: command.source_ref,
+                        ordinal: command.ordinal,
+                        kind: command.kind.unwrap_or_else(|| "message".to_owned()),
+                        role: command.role,
+                        text: command.text,
+                        occurred_at: command.occurred_at,
+                        metadata_json: command.metadata_json,
+                    },
+                )?;
+                if cli.json {
+                    print_json(&entry)?;
+                } else {
+                    println!(
+                        "{}\t{}\t{}\t{}",
+                        entry.id, entry.ordinal, entry.source_ref, entry.text
+                    );
+                }
+            }
+            EpisodeSubcommand::End(command) => {
+                let episode = store.end_episode(&command.episode, command.ended_at)?;
+                if cli.json {
+                    print_json(&episode)?;
+                } else {
+                    println!("ended {} at {}", episode.id, episode.ended_at.unwrap_or_default());
+                }
+            }
+            EpisodeSubcommand::Get(command) => {
+                let record = store.get_episode(&command.episode)?;
+                if cli.json {
+                    print_json(&record)?;
+                } else {
+                    print_episode(&record);
+                }
+            }
+        },
+        Command::History(command) => {
+            let project_id = memory_project(command.project.as_deref(), command.global_history)?;
+            let hits = store.history_search(
+                &command.query,
+                project_id.as_deref(),
+                command.limit.unwrap_or(10).clamp(1, 100),
+            )?;
+            if cli.json {
+                print_json(&hits)?;
+            } else {
+                for hit in hits {
+                    let scope = hit.project_id.as_deref().unwrap_or("global");
+                    println!(
+                        "{}\t{}\t{}\t{}\t{}\t{}",
+                        hit.episode_id,
+                        hit.ordinal,
+                        scope,
+                        hit.episode_source_ref,
+                        hit.entry_source_ref,
+                        hit.text
+                    );
+                }
+            }
+        }
     }
 
     Ok(())
@@ -562,6 +766,20 @@ fn optional_project_context(
 fn project_context(project: Option<&str>, workspace: Option<&str>) -> Result<ProjectContext> {
     optional_project_context(project, workspace)?
         .context("no project detected; run inside a Git repository or pass --project")
+}
+
+fn episode_context(
+    project: Option<&str>,
+    workspace: Option<&str>,
+    global: bool,
+) -> Result<Option<ProjectContext>> {
+    if global && (project.is_some() || workspace.is_some()) {
+        bail!("--global conflicts with --project and --workspace");
+    }
+    if global {
+        return Ok(None);
+    }
+    optional_project_context(project, workspace)
 }
 
 fn memory_project(explicit: Option<&str>, global: bool) -> Result<Option<String>> {
@@ -621,6 +839,31 @@ fn print_context(output: &ContextOutput) {
             let locator = source.locator.as_deref().unwrap_or("-");
             println!("    source: {} {locator}", source.source_type);
         }
+    }
+}
+
+fn print_episode(record: &crate::episode::EpisodeRecord) {
+    let episode = &record.episode;
+    println!("id: {}", episode.id);
+    if let Some(project) = &episode.project_id {
+        println!("project: {project}");
+    }
+    if let Some(workspace) = &episode.workspace_id {
+        println!("workspace: {workspace}");
+    }
+    println!("source: {} {}", episode.source_type, episode.source_ref);
+    if let Some(started_at) = episode.started_at {
+        println!("started_at: {started_at}");
+    }
+    if let Some(ended_at) = episode.ended_at {
+        println!("ended_at: {ended_at}");
+    }
+    for entry in &record.entries {
+        let role = entry.role.as_deref().unwrap_or("-");
+        println!(
+            "entry: {}\t{}\t{}\t{}\t{}",
+            entry.ordinal, entry.kind, role, entry.source_ref, entry.text
+        );
     }
 }
 

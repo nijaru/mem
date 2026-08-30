@@ -6,7 +6,7 @@ The project is agent-runtime agnostic: the Rust CLI owns durable storage, retrie
 
 ## Status
 
-Early development. The current core provides durable semantic memory, non-destructive correction/supersession, SQLite FTS5 retrieval, automatic Git project/workspace identity, compact continuation state, and an adapter-facing `context` operation.
+Early development. The current core provides durable semantic memory, SQLite FTS5 retrieval, automatic Git project/workspace identity, compact continuation state, and an adapter-facing `context` operation.
 
 Episodic indexing, embeddings, automatic memory construction, and agent adapters are still intentionally deferred.
 
@@ -15,7 +15,6 @@ Episodic indexing, embeddings, automatic memory construction, and agent adapters
 - **SQLite is canonical.** The database is local, transactional, and portable.
 - **Semantic memory, episodic history, and continuation state are different data.** They do not share one generic log or `MEMORY.md` abstraction.
 - **Provenance is first-class.** A semantic memory records who established it and at least one source type.
-- **Corrections preserve history.** Replacements supersede active memories atomically instead of mutating or discarding prior evidence.
 - **FTS is immediate.** SQLite FTS5 is updated with memory writes, so retrieval works without an embedding model.
 - **Embeddings are derived data.** Vector indexing will be incremental/background work and must not be required for correctness.
 - **Project knowledge and workspace state have different scope.** Durable memory is project/origin scoped; continuation is project + branch/detached-workspace scoped.
@@ -58,11 +57,6 @@ mem remember "Prefer source evidence over stale summaries" \
   --kind preference \
   --global
 
-# Correct an active memory without destroying its history.
-mem correct <id-or-prefix> "Publication uses release/acquire ordering" \
-  --source-type git \
-  --source-ref def456
-
 # Precise lexical search: all query terms must match a memory.
 mem search "publication ordering"
 
@@ -77,7 +71,6 @@ mem state clear
 # Adapter-facing retrieval: state + broad semantic recall + provenance.
 mem context "publication handoff"
 
-# Includes provenance and semantic relations such as superseded_by.
 mem get <id-or-prefix>
 mem forget <id-or-prefix>
 ```
@@ -114,22 +107,7 @@ This keeps durable project memory shared across branches while preventing indepe
 - matching active project + global semantic memories;
 - provenance for each selected memory.
 
-Superseded and deleted memories are retained in canonical storage but excluded from active search/recall.
-
 Current lexical retrieval does not perform stemming, semantic expansion, or embedding search. Those belong to later hybrid retrieval rather than being hidden inside the baseline.
-
-## Corrections and relations
-
-`mem correct` only accepts an active memory. In one SQLite transaction it:
-
-1. creates a replacement in the same global/project scope;
-2. attaches new provenance to the replacement;
-3. marks the previous record `superseded`;
-4. records a `superseded_by` relation from old → new.
-
-The replacement inherits the old memory kind unless `--kind` is supplied. It cannot silently move a memory between global and project scope.
-
-`mem get` returns both incoming and outgoing semantic relations, so either side of a correction remains explainable.
 
 ## Data location
 
@@ -153,16 +131,15 @@ Current memory kinds:
 
 A memory is either global or project-scoped. Inside a Git repository, `remember` and `search` use the detected project by default; project retrieval also includes global memories. `--global` selects global-only behavior.
 
-Memory status is one of `active`, `superseded`, or `deleted`. `mem status` reports each category explicitly.
-
 ## Next
 
 The next qualified slices are expected to be:
 
-1. episodic source/index primitives with exact session backreferences;
-2. durable background indexing jobs and local embeddings;
-3. hybrid FTS/vector retrieval;
-4. a thin Pi extension, with a warm `mem serve --stdio` mode only if it materially helps latency.
+1. correction/supersession semantics and richer relation-aware reads;
+2. episodic source/index primitives with exact session backreferences;
+3. durable background indexing jobs and local embeddings;
+4. hybrid FTS/vector retrieval;
+5. a thin Pi extension, with a warm `mem serve --stdio` mode only if it materially helps latency.
 
 ANN indexes, automatic LLM memory promotion, sync protocols, and custom database backends remain deferred until measured requirements justify them.
 

@@ -7,11 +7,11 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::Serialize;
 use uuid::Uuid;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 const MEMORY_KINDS: &[&str] = &["fact", "decision", "constraint", "preference", "procedure"];
 
 pub struct Store {
-    connection: Connection,
+    pub(crate) connection: Connection,
 }
 
 pub struct NewMemory {
@@ -433,19 +433,27 @@ impl Store {
     }
 
     fn migrate(&self) -> Result<()> {
-        match self.schema_version()? {
-            0 => {
-                self.connection
-                    .execute_batch(include_str!("../migrations/0001_initial.sql"))?;
-                self.connection
-                    .pragma_update(None, "user_version", SCHEMA_VERSION)?;
-                Ok(())
-            }
-            SCHEMA_VERSION => Ok(()),
-            version => bail!(
+        let version = self.schema_version()?;
+        if version > SCHEMA_VERSION {
+            bail!(
                 "database schema version {version} is newer than supported version {SCHEMA_VERSION}"
-            ),
+            );
         }
+
+        if version == 0 {
+            self.connection
+                .execute_batch(include_str!("../migrations/0001_initial.sql"))?;
+        }
+        if self.schema_version()? == 1 {
+            self.connection
+                .execute_batch(include_str!("../migrations/0002_episode_entries.sql"))?;
+        }
+
+        let version = self.schema_version()?;
+        if version != SCHEMA_VERSION {
+            bail!("failed to migrate database to schema version {SCHEMA_VERSION}; got {version}");
+        }
+        Ok(())
     }
 
     fn schema_version(&self) -> Result<i64> {
