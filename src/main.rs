@@ -275,7 +275,8 @@ fn run(cli: MemCli) -> Result<()> {
             }
         }
         Command::Project(command) => {
-            let context = project_context(command.project.as_deref(), command.workspace.as_deref())?;
+            let context =
+                project_context(command.project.as_deref(), command.workspace.as_deref())?;
             if cli.json {
                 print_json(&context)?;
             } else {
@@ -299,7 +300,10 @@ fn run(cli: MemCli) -> Result<()> {
                 } else if let Some(state) = state {
                     print_workspace_state(&state);
                 } else {
-                    println!("no state for {} {}", context.project_id, context.workspace_id);
+                    println!(
+                        "no state for {} {}",
+                        context.project_id, context.workspace_id
+                    );
                 }
             }
             StateCommand::Set(command) => {
@@ -331,9 +335,15 @@ fn run(cli: MemCli) -> Result<()> {
                         cleared,
                     })?;
                 } else if cleared {
-                    println!("cleared state for {} {}", context.project_id, context.workspace_id);
+                    println!(
+                        "cleared state for {} {}",
+                        context.project_id, context.workspace_id
+                    );
                 } else {
-                    println!("no state for {} {}", context.project_id, context.workspace_id);
+                    println!(
+                        "no state for {} {}",
+                        context.project_id, context.workspace_id
+                    );
                 }
             }
         },

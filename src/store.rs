@@ -406,7 +406,10 @@ fn validate_identity(value: &str, kind: &str) -> Result<()> {
 }
 
 fn validate_optional(value: &Option<String>, kind: &str) -> Result<()> {
-    if value.as_deref().is_some_and(|value| value.trim().is_empty()) {
+    if value
+        .as_deref()
+        .is_some_and(|value| value.trim().is_empty())
+    {
         bail!("{kind} value cannot be empty");
     }
     Ok(())
