@@ -10,7 +10,7 @@ use serde::Serialize;
 use usage::{Args, Cli, Subcommands};
 
 use crate::project::ProjectContext;
-use crate::store::{NewMemory, Store};
+use crate::store::{NewMemory, NewWorkspaceState, Store, WorkspaceState};
 
 #[derive(Cli)]
 #[usage(bin = "mem", version, arg_required_else_help, unknown_flags = "error")]
@@ -32,6 +32,7 @@ enum Command {
     Init(Init),
     Status(Status),
     Project(Project),
+    State(State),
     Remember(Remember),
     Search(Search),
     Get(Get),
@@ -49,6 +50,72 @@ struct Status;
 /// Show the detected project and workspace identity.
 #[derive(Args)]
 struct Project {
+    /// Override the project identifier.
+    #[usage(long)]
+    project: Option<String>,
+
+    /// Override the workspace identifier.
+    #[usage(long)]
+    workspace: Option<String>,
+}
+
+/// Read or update compact workspace continuation state.
+#[derive(Args)]
+struct State {
+    #[usage(subcommand)]
+    command: StateCommand,
+}
+
+#[derive(Subcommands)]
+enum StateCommand {
+    Show(StateShow),
+    Set(StateSet),
+    Clear(StateClear),
+}
+
+/// Show continuation state for the current workspace.
+#[derive(Args)]
+struct StateShow {
+    /// Override the project identifier.
+    #[usage(long)]
+    project: Option<String>,
+
+    /// Override the workspace identifier.
+    #[usage(long)]
+    workspace: Option<String>,
+}
+
+/// Replace continuation state for the current workspace.
+#[derive(Args)]
+struct StateSet {
+    /// Override the project identifier.
+    #[usage(long)]
+    project: Option<String>,
+
+    /// Override the workspace identifier.
+    #[usage(long)]
+    workspace: Option<String>,
+
+    /// Last agent/session identifier associated with this checkpoint.
+    #[usage(long)]
+    session: Option<String>,
+
+    /// Current high-level goal.
+    #[usage(long)]
+    goal: Option<String>,
+
+    /// Optional external task reference.
+    #[usage(long)]
+    task: Option<String>,
+
+    /// Compact resume checkpoint.
+    #[usage(long)]
+    checkpoint: Option<String>,
+}
+
+/// Remove continuation state for the current workspace.
+#[derive(Args)]
+struct StateClear {
     /// Override the project identifier.
     #[usage(long)]
     project: Option<String>,
@@ -131,6 +198,13 @@ struct StatusOutput {
     deleted: u64,
 }
 
+#[derive(Serialize)]
+struct ClearStateOutput<'a> {
+    project_id: &'a str,
+    workspace_id: &'a str,
+    cleared: bool,
+}
+
 fn main() {
     let argv: Vec<String> = std::env::args().collect();
     let Some(cli) = parse_cli(&argv) else {
@@ -201,9 +275,7 @@ fn run(cli: MemCli) -> Result<()> {
             }
         }
         Command::Project(command) => {
-            let context =
-                ProjectContext::detect(command.project.as_deref(), command.workspace.as_deref())?
-                    .context("no project detected; run inside a Git repository or pass --project")?;
+            let context = project_context(command.project.as_deref(), command.workspace.as_deref())?;
             if cli.json {
                 print_json(&context)?;
             } else {
@@ -217,6 +289,54 @@ fn run(cli: MemCli) -> Result<()> {
                 }
             }
         }
+        Command::State(command) => match command.command {
+            StateCommand::Show(command) => {
+                let context =
+                    project_context(command.project.as_deref(), command.workspace.as_deref())?;
+                let state = store.workspace_state(&context.project_id, &context.workspace_id)?;
+                if cli.json {
+                    print_json(&state)?;
+                } else if let Some(state) = state {
+                    print_workspace_state(&state);
+                } else {
+                    println!("no state for {} {}", context.project_id, context.workspace_id);
+                }
+            }
+            StateCommand::Set(command) => {
+                let context =
+                    project_context(command.project.as_deref(), command.workspace.as_deref())?;
+                let state = store.set_workspace_state(NewWorkspaceState {
+                    project_id: context.project_id,
+                    workspace_id: context.workspace_id,
+                    last_session_id: command.session,
+                    active_goal: command.goal,
+                    active_task_ref: command.task,
+                    checkpoint: command.checkpoint,
+                })?;
+                if cli.json {
+                    print_json(&state)?;
+                } else {
+                    print_workspace_state(&state);
+                }
+            }
+            StateCommand::Clear(command) => {
+                let context =
+                    project_context(command.project.as_deref(), command.workspace.as_deref())?;
+                let cleared =
+                    store.clear_workspace_state(&context.project_id, &context.workspace_id)?;
+                if cli.json {
+                    print_json(&ClearStateOutput {
+                        project_id: &context.project_id,
+                        workspace_id: &context.workspace_id,
+                        cleared,
+                    })?;
+                } else if cleared {
+                    println!("cleared state for {} {}", context.project_id, context.workspace_id);
+                } else {
+                    println!("no state for {} {}", context.project_id, context.workspace_id);
+                }
+            }
+        },
         Command::Remember(command) => {
             let project_id = memory_project(command.project.as_deref(), command.global_memory)?;
             let memory = store.remember(NewMemory {
@@ -289,6 +409,11 @@ fn run(cli: MemCli) -> Result<()> {
     Ok(())
 }
 
+fn project_context(project: Option<&str>, workspace: Option<&str>) -> Result<ProjectContext> {
+    ProjectContext::detect(project, workspace)?
+        .context("no project detected; run inside a Git repository or pass --project")
+}
+
 fn memory_project(explicit: Option<&str>, global: bool) -> Result<Option<String>> {
     if global && explicit.is_some() {
         bail!("--global conflicts with --project");
@@ -305,6 +430,24 @@ fn memory_project(explicit: Option<&str>, global: bool) -> Result<Option<String>
     }
 
     Ok(ProjectContext::detect(None, None)?.map(|context| context.project_id))
+}
+
+fn print_workspace_state(state: &WorkspaceState) {
+    println!("project: {}", state.project_id);
+    println!("workspace: {}", state.workspace_id);
+    if let Some(session) = &state.last_session_id {
+        println!("session: {session}");
+    }
+    if let Some(goal) = &state.active_goal {
+        println!("goal: {goal}");
+    }
+    if let Some(task) = &state.active_task_ref {
+        println!("task: {task}");
+    }
+    if let Some(checkpoint) = &state.checkpoint {
+        println!("checkpoint: {checkpoint}");
+    }
+    println!("updated_at: {}", state.updated_at);
 }
 
 fn database_path(override_path: Option<&Path>) -> Result<PathBuf> {

@@ -3,7 +3,7 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use rusqlite::{Connection, Row, params};
+use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -21,6 +21,15 @@ pub struct NewMemory {
     pub actor: String,
     pub source_type: String,
     pub source_ref: Option<String>,
+}
+
+pub struct NewWorkspaceState {
+    pub project_id: String,
+    pub workspace_id: String,
+    pub last_session_id: Option<String>,
+    pub active_goal: Option<String>,
+    pub active_task_ref: Option<String>,
+    pub checkpoint: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -56,6 +65,17 @@ pub struct MemoryRecord {
 pub struct SearchHit {
     pub memory: Memory,
     pub rank: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WorkspaceState {
+    pub project_id: String,
+    pub workspace_id: String,
+    pub last_session_id: Option<String>,
+    pub active_goal: Option<String>,
+    pub active_task_ref: Option<String>,
+    pub checkpoint: Option<String>,
+    pub updated_at: i64,
 }
 
 pub struct StoreStats {
@@ -232,6 +252,71 @@ impl Store {
         Ok(id)
     }
 
+    pub fn workspace_state(
+        &self,
+        project_id: &str,
+        workspace_id: &str,
+    ) -> Result<Option<WorkspaceState>> {
+        validate_identity(project_id, "project")?;
+        validate_identity(workspace_id, "workspace")?;
+
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT project_id, workspace_id, last_session_id, active_goal,\n\
+                        active_task_ref, checkpoint, updated_at\n\
+                 FROM workspace_state\n\
+                 WHERE project_id = ?1 AND workspace_id = ?2",
+                params![project_id, workspace_id],
+                workspace_state_from_row,
+            )
+            .optional()?)
+    }
+
+    pub fn set_workspace_state(&self, input: NewWorkspaceState) -> Result<WorkspaceState> {
+        validate_identity(&input.project_id, "project")?;
+        validate_identity(&input.workspace_id, "workspace")?;
+        validate_optional(&input.last_session_id, "session")?;
+        validate_optional(&input.active_goal, "goal")?;
+        validate_optional(&input.active_task_ref, "task")?;
+        validate_optional(&input.checkpoint, "checkpoint")?;
+
+        let now = unix_millis()?;
+        self.connection.execute(
+            "INSERT INTO workspace_state (\n\
+                 project_id, workspace_id, last_session_id, active_goal, active_task_ref,\n\
+                 checkpoint, updated_at\n\
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)\n\
+             ON CONFLICT(project_id, workspace_id) DO UPDATE SET\n\
+                 last_session_id = excluded.last_session_id,\n\
+                 active_goal = excluded.active_goal,\n\
+                 active_task_ref = excluded.active_task_ref,\n\
+                 checkpoint = excluded.checkpoint,\n\
+                 updated_at = excluded.updated_at",
+            params![
+                &input.project_id,
+                &input.workspace_id,
+                &input.last_session_id,
+                &input.active_goal,
+                &input.active_task_ref,
+                &input.checkpoint,
+                now
+            ],
+        )?;
+
+        self.workspace_state(&input.project_id, &input.workspace_id)?
+            .context("workspace state disappeared after write")
+    }
+
+    pub fn clear_workspace_state(&self, project_id: &str, workspace_id: &str) -> Result<bool> {
+        validate_identity(project_id, "project")?;
+        validate_identity(workspace_id, "workspace")?;
+        Ok(self.connection.execute(
+            "DELETE FROM workspace_state WHERE project_id = ?1 AND workspace_id = ?2",
+            params![project_id, workspace_id],
+        )? > 0)
+    }
+
     fn migrate(&self) -> Result<()> {
         match self.schema_version()? {
             0 => {
@@ -307,8 +392,22 @@ fn validate_new_memory(input: &NewMemory) -> Result<()> {
     if input.source_type.trim().is_empty() {
         bail!("memory source type cannot be empty");
     }
-    if input.project_id.as_deref().is_some_and(str::is_empty) {
-        bail!("project identifier cannot be empty");
+    if let Some(project_id) = input.project_id.as_deref() {
+        validate_identity(project_id, "project")?;
+    }
+    Ok(())
+}
+
+fn validate_identity(value: &str, kind: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        bail!("{kind} identifier cannot be empty");
+    }
+    Ok(())
+}
+
+fn validate_optional(value: &Option<String>, kind: &str) -> Result<()> {
+    if value.as_deref().is_some_and(|value| value.trim().is_empty()) {
+        bail!("{kind} value cannot be empty");
     }
     Ok(())
 }
@@ -346,6 +445,18 @@ fn search_hit_from_row(row: &Row<'_>) -> rusqlite::Result<SearchHit> {
     })
 }
 
+fn workspace_state_from_row(row: &Row<'_>) -> rusqlite::Result<WorkspaceState> {
+    Ok(WorkspaceState {
+        project_id: row.get(0)?,
+        workspace_id: row.get(1)?,
+        last_session_id: row.get(2)?,
+        active_goal: row.get(3)?,
+        active_task_ref: row.get(4)?,
+        checkpoint: row.get(5)?,
+        updated_at: row.get(6)?,
+    })
+}
+
 fn fts_query(input: &str) -> Result<String> {
     let terms: Vec<String> = input
         .split_whitespace()
@@ -362,4 +473,56 @@ fn unix_millis() -> Result<i64> {
         .duration_since(UNIX_EPOCH)
         .context("system clock is before the Unix epoch")?;
     Ok(i64::try_from(duration.as_millis())?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{NewWorkspaceState, Store};
+    use uuid::Uuid;
+
+    #[test]
+    fn workspace_state_round_trips_and_clears() {
+        let path = std::env::temp_dir().join(format!("mem-test-{}.db", Uuid::now_v7()));
+        let store = Store::open(&path).expect("open test store");
+
+        assert!(
+            store
+                .workspace_state("github.com/nijaru/mem", "branch:main")
+                .expect("read empty state")
+                .is_none()
+        );
+
+        let state = store
+            .set_workspace_state(NewWorkspaceState {
+                project_id: "github.com/nijaru/mem".to_owned(),
+                workspace_id: "branch:main".to_owned(),
+                last_session_id: Some("session-1".to_owned()),
+                active_goal: Some("build continuation state".to_owned()),
+                active_task_ref: None,
+                checkpoint: Some("project identity is validated".to_owned()),
+            })
+            .expect("write state");
+        assert_eq!(state.last_session_id.as_deref(), Some("session-1"));
+        assert_eq!(
+            state.active_goal.as_deref(),
+            Some("build continuation state")
+        );
+
+        assert!(
+            store
+                .clear_workspace_state("github.com/nijaru/mem", "branch:main")
+                .expect("clear state")
+        );
+        assert!(
+            store
+                .workspace_state("github.com/nijaru/mem", "branch:main")
+                .expect("read cleared state")
+                .is_none()
+        );
+
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+    }
 }
