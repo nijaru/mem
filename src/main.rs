@@ -163,7 +163,7 @@ fn parse_cli(argv: &[String]) -> Option<MemCli> {
 
 fn run(cli: MemCli) -> Result<()> {
     let db_path = database_path(cli.db.as_deref())?;
-    let store = Store::open(&db_path)
+    let mut store = Store::open(&db_path)
         .with_context(|| format!("open memory database at {}", db_path.display()))?;
 
     match cli.command {
@@ -209,11 +209,7 @@ fn run(cli: MemCli) -> Result<()> {
                 print_json(&hits)?;
             } else {
                 for hit in hits {
-                    let scope = hit
-                        .memory
-                        .project_id
-                        .as_deref()
-                        .map_or("global", |project| project);
+                    let scope = hit.memory.project_id.as_deref().unwrap_or("global");
                     println!(
                         "{}\t{}\t{}\t{}",
                         hit.memory.id, hit.memory.kind, scope, hit.memory.text
