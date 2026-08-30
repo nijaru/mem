@@ -10,9 +10,7 @@ use serde::Serialize;
 use usage::{Args, Cli, Subcommands};
 
 use crate::project::ProjectContext;
-use crate::store::{
-    Memory, MemorySource, NewMemory, NewWorkspaceState, Store, WorkspaceState,
-};
+use crate::store::{Memory, MemorySource, NewMemory, NewWorkspaceState, Store, WorkspaceState};
 
 #[derive(Cli)]
 #[usage(bin = "mem", version, arg_required_else_help, unknown_flags = "error")]
@@ -383,10 +381,8 @@ fn run(cli: MemCli) -> Result<()> {
             }
         },
         Command::Context(command) => {
-            let project = optional_project_context(
-                command.project.as_deref(),
-                command.workspace.as_deref(),
-            )?;
+            let project =
+                optional_project_context(command.project.as_deref(), command.workspace.as_deref())?;
             let state = if let Some(project) = project.as_ref() {
                 store.workspace_state(&project.project_id, &project.workspace_id)?
             } else {
