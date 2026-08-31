@@ -35,7 +35,10 @@ pub struct EmbeddingRunStats {
 }
 
 impl Store {
-    pub fn run_embedding_jobs(&mut self, options: EmbeddingRunOptions) -> Result<EmbeddingRunStats> {
+    pub fn run_embedding_jobs(
+        &mut self,
+        options: EmbeddingRunOptions,
+    ) -> Result<EmbeddingRunStats> {
         validate_options(&options)?;
         fs::create_dir_all(&options.cache_dir).with_context(|| {
             format!(
