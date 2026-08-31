@@ -681,7 +681,10 @@ fn run(cli: MemCli) -> Result<()> {
                 if cli.json {
                     print_json(&episode)?;
                 } else {
-                    println!("{}\t{}\t{}", episode.id, episode.source_type, episode.source_ref);
+                    println!(
+                        "{}\t{}\t{}",
+                        episode.id, episode.source_type, episode.source_ref
+                    );
                 }
             }
             EpisodeSubcommand::Record(command) => {
@@ -711,7 +714,11 @@ fn run(cli: MemCli) -> Result<()> {
                 if cli.json {
                     print_json(&episode)?;
                 } else {
-                    println!("ended {} at {}", episode.id, episode.ended_at.unwrap_or_default());
+                    println!(
+                        "ended {} at {}",
+                        episode.id,
+                        episode.ended_at.unwrap_or_default()
+                    );
                 }
             }
             EpisodeSubcommand::Get(command) => {
