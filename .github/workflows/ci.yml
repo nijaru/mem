@@ -18,6 +18,8 @@ jobs:
           toolchain: 1.98.0
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Shell syntax
+        run: bash -n scripts/*.sh
       - name: Format
         run: cargo fmt --all -- --check
       - name: Test
