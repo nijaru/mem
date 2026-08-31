@@ -83,9 +83,10 @@ fn compare_lexical_semantic_and_rrf_retrieval() {
         .expect("other-project distractor ID");
     let mut lexical_metrics = Metrics::default();
     let mut semantic_metrics = Metrics::default();
-    let mut hybrid_metrics = Metrics::default();
+    let mut equal_rrf_metrics = Metrics::default();
+    let mut semantic_weighted_metrics = Metrics::default();
 
-    println!("case\tlexical\tsemantic\trrf\tquery");
+    println!("case\tlexical\tsemantic\trrf\trrf-s2\tquery");
     for case in &cases {
         let expected = ids
             .get(case.key)
@@ -102,21 +103,25 @@ fn compare_lexical_semantic_and_rrf_retrieval() {
             "semantic retrieval leaked other-project memory"
         );
 
-        let hybrid = rrf(&lexical, &semantic, LIMIT);
+        let equal_rrf = rrf(&lexical, &semantic, 1.0, 1.0, LIMIT);
+        let semantic_weighted = rrf(&lexical, &semantic, 1.0, 2.0, LIMIT);
         let lexical_rank = rank_of(&lexical, expected);
         let semantic_rank = rank_of(&semantic, expected);
-        let hybrid_rank = rank_of(&hybrid, expected);
+        let equal_rrf_rank = rank_of(&equal_rrf, expected);
+        let semantic_weighted_rank = rank_of(&semantic_weighted, expected);
 
         lexical_metrics.observe(lexical_rank);
         semantic_metrics.observe(semantic_rank);
-        hybrid_metrics.observe(hybrid_rank);
+        equal_rrf_metrics.observe(equal_rrf_rank);
+        semantic_weighted_metrics.observe(semantic_weighted_rank);
 
         println!(
-            "{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}",
             case.key,
             display_rank(lexical_rank),
             display_rank(semantic_rank),
-            display_rank(hybrid_rank),
+            display_rank(equal_rrf_rank),
+            display_rank(semantic_weighted_rank),
             case.query
         );
     }
@@ -124,7 +129,8 @@ fn compare_lexical_semantic_and_rrf_retrieval() {
     println!();
     lexical_metrics.print("lexical-or");
     semantic_metrics.print("semantic");
-    hybrid_metrics.print("rrf");
+    equal_rrf_metrics.print("rrf");
+    semantic_weighted_metrics.print("rrf-semantic-2x");
 
     cleanup(&db);
 }
@@ -366,11 +372,17 @@ fn semantic_ids(db: &Path, query: &str) -> Vec<String> {
         .collect()
 }
 
-fn rrf(lexical: &[String], semantic: &[String], limit: usize) -> Vec<String> {
+fn rrf(
+    lexical: &[String],
+    semantic: &[String],
+    lexical_weight: f64,
+    semantic_weight: f64,
+    limit: usize,
+) -> Vec<String> {
     let mut scores = HashMap::<String, f64>::new();
-    for ranking in [lexical, semantic] {
+    for (ranking, weight) in [(lexical, lexical_weight), (semantic, semantic_weight)] {
         for (index, id) in ranking.iter().enumerate() {
-            *scores.entry(id.clone()).or_default() += 1.0 / (RRF_K + (index + 1) as f64);
+            *scores.entry(id.clone()).or_default() += weight / (RRF_K + (index + 1) as f64);
         }
     }
 
