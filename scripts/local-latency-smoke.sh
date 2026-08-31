@@ -7,7 +7,7 @@ cd "$repo_root"
 cargo build --release
 mem_bin="$repo_root/target/release/mem"
 
-db="$(mktemp "${TMPDIR:-/tmp}/mem-local-smoke.XXXXXX.db")"
+db="$(mktemp "${TMPDIR:-/tmp}/mem-local-smoke.XXXXXX")"
 cleanup() {
   rm -f "$db" "$db-shm" "$db-wal"
 }
@@ -44,7 +44,7 @@ printf '\n== lexical AND control (expected to miss or be weak) ==\n'
 for run in 1 2 3; do
   printf '\n== one-shot semantic query %s ==\n' "$run"
   time "$mem_bin" --db "$db" search "$query" --global --semantic -n 4
- done
+done
 
 printf '\nModel cache: %s\n' "${MEM_MODEL_CACHE:-${HF_HOME:-<mem default cache>}}"
 printf 'DB was temporary and will be deleted: %s\n' "$db"
