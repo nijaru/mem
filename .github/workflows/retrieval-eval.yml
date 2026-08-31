@@ -1,0 +1,37 @@
+name: retrieval-eval
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/retrieval-eval.yml
+      - tests/retrieval_eval.rs
+      - Cargo.toml
+      - src/embedding.rs
+      - src/embedding_worker.rs
+      - src/main.rs
+      - src/store.rs
+      - src/vector_search.rs
+
+permissions:
+  contents: read
+
+jobs:
+  retrieval:
+    runs-on: ubuntu-22.04
+    env:
+      MEM_MODEL_CACHE: ${{ github.workspace }}/.model-cache
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Cache embedding model
+        uses: actions/cache@v4
+        with:
+          path: .model-cache
+          key: fastembed-5.3.0-bge-small-en-v1.5-q-${{ runner.os }}-${{ runner.arch }}
+      - name: Run retrieval evaluation
+        run: cargo test --test retrieval_eval -- --ignored --nocapture
