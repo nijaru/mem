@@ -870,9 +870,15 @@ fn run(cli: MemCli) -> Result<()> {
                         "completed": completed
                     }))?;
                 } else if completed {
-                    println!("completed {} generation {}", command.job, command.generation);
+                    println!(
+                        "completed {} generation {}",
+                        command.job, command.generation
+                    );
                 } else {
-                    println!("stale or unowned job {} generation {}", command.job, command.generation);
+                    println!(
+                        "stale or unowned job {} generation {}",
+                        command.job, command.generation
+                    );
                 }
             }
             IndexSubcommand::Retry(command) => {
@@ -892,7 +898,10 @@ fn run(cli: MemCli) -> Result<()> {
                 } else if retried {
                     println!("retried {} generation {}", command.job, command.generation);
                 } else {
-                    println!("stale or unowned job {} generation {}", command.job, command.generation);
+                    println!(
+                        "stale or unowned job {} generation {}",
+                        command.job, command.generation
+                    );
                 }
             }
         },
