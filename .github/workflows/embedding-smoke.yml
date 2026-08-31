@@ -10,6 +10,7 @@ on:
       - src/embedding.rs
       - src/embedding_worker.rs
       - src/main.rs
+      - src/vector_search.rs
 
 permissions:
   contents: read
@@ -36,28 +37,36 @@ jobs:
           key: fastembed-5.3.0-bge-small-en-v1.5-q-${{ runner.os }}-${{ runner.arch }}
       - name: Build
         run: cargo build --release
-      - name: Run embedding smoke
+      - name: Run embedding and semantic retrieval smoke
         shell: bash
         run: |
           set -euo pipefail
           db="$RUNNER_TEMP/mem-smoke.db"
+          target="Each Git worktree keeps an independent continuation checkpoint."
+          query="separate resume state for parallel repository checkouts"
 
+          target/release/mem --db "$db" remember "$target" \
+            --kind decision --global --source-type smoke
           target/release/mem --db "$db" remember \
-            "Publication handoff uses release/acquire ordering" \
-            --kind decision \
-            --global \
-            --source-type smoke
+            "Embedding workers retry failed inference after a delay." \
+            --kind procedure --global --source-type smoke
+          target/release/mem --db "$db" remember \
+            "Deleted memories are excluded from active search results." \
+            --kind fact --global --source-type smoke
+          target/release/mem --db "$db" remember \
+            "Semantic memories retain provenance evidence for their source." \
+            --kind fact --global --source-type smoke
 
-          run_json="$(target/release/mem --json --db "$db" index run -n 1)"
+          run_json="$(target/release/mem --json --db "$db" index run -n 4)"
           printf '%s\n' "$run_json"
           RUN_JSON="$run_json" python3 - <<'PY'
           import json
           import os
 
           result = json.loads(os.environ["RUN_JSON"])
-          assert result["claimed"] == 1, result
-          assert result["eligible"] == 1, result
-          assert result["committed"] == 1, result
+          assert result["claimed"] == 4, result
+          assert result["eligible"] == 4, result
+          assert result["committed"] == 4, result
           assert result["stale"] == 0, result
           assert result["retried"] == 0, result
           PY
@@ -71,4 +80,26 @@ jobs:
           status = json.loads(os.environ["STATUS_JSON"])
           assert status["pending"] == 0, status
           assert status["running"] == 0, status
+          PY
+
+          lexical_json="$(target/release/mem --json --db "$db" search "$query" --global -n 4)"
+          printf '%s\n' "$lexical_json"
+          LEXICAL_JSON="$lexical_json" python3 - <<'PY'
+          import json
+          import os
+
+          hits = json.loads(os.environ["LEXICAL_JSON"])
+          assert hits == [], hits
+          PY
+
+          semantic_json="$(target/release/mem --json --db "$db" search "$query" --semantic --global -n 4)"
+          printf '%s\n' "$semantic_json"
+          SEMANTIC_JSON="$semantic_json" TARGET="$target" python3 - <<'PY'
+          import json
+          import os
+
+          hits = json.loads(os.environ["SEMANTIC_JSON"])
+          assert len(hits) == 4, hits
+          assert hits[0]["memory"]["text"] == os.environ["TARGET"], hits
+          assert hits[0]["score"] > hits[1]["score"], hits
           PY
