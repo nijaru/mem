@@ -43,15 +43,6 @@ interface EpisodeRecordOutput {
   }>;
 }
 
-interface SessionMessageEntry {
-  type: "message";
-  id: string;
-  message: Record<string, unknown> & {
-    role?: string;
-    timestamp?: number;
-  };
-}
-
 export default function memExtension(pi: ExtensionAPI) {
   let turnRecall: string | undefined;
   let episodeId: string | undefined;
@@ -116,20 +107,19 @@ export default function memExtension(pi: ExtensionAPI) {
     await ensureEpisode(ctx);
     if (!episodeId) return;
 
-    for (const rawEntry of ctx.sessionManager.getBranch()) {
-      if (rawEntry.type !== "message" || seenEntryIds.has(rawEntry.id)) continue;
+    for (const entry of ctx.sessionManager.getBranch()) {
+      if (entry.type !== "message" || seenEntryIds.has(entry.id)) continue;
 
-      const entry = rawEntry as SessionMessageEntry;
-      const text = searchableMessageText(entry.message);
+      const message = entry.message as unknown as Record<string, unknown>;
+      const text = searchableMessageText(message);
       if (!text) {
         seenEntryIds.add(entry.id);
         continue;
       }
 
-      const role = typeof entry.message.role === "string" ? entry.message.role : undefined;
-      const occurredAt =
-        typeof entry.message.timestamp === "number" ? entry.message.timestamp : undefined;
-      const metadata = messageMetadata(entry.message);
+      const role = typeof message.role === "string" ? message.role : undefined;
+      const occurredAt = typeof message.timestamp === "number" ? message.timestamp : undefined;
+      const metadata = messageMetadata(message);
       const args = [
         "episode",
         "record",
@@ -246,7 +236,7 @@ function formatRecall(output: MemContextOutput): string | undefined {
   return sections.join("\n");
 }
 
-function findLastUserMessage(messages: readonly Array<{ role?: string }>): number {
+function findLastUserMessage(messages: ReadonlyArray<{ role?: string }>): number {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     if (messages[index]?.role === "user") return index;
   }
