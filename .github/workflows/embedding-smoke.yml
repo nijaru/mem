@@ -9,6 +9,7 @@ on:
       - Cargo.toml
       - src/embedding.rs
       - src/embedding_worker.rs
+      - src/main.rs
 
 permissions:
   contents: read
@@ -47,7 +48,7 @@ jobs:
             --global \
             --source-type smoke
 
-          run_json="$(target/release/mem --json --db "$db" index run -n 1 --threads 1)"
+          run_json="$(target/release/mem --json --db "$db" index run -n 1)"
           printf '%s\n' "$run_json"
           RUN_JSON="$run_json" python3 - <<'PY'
           import json
