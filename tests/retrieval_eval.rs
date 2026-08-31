@@ -87,7 +87,9 @@ fn compare_lexical_semantic_and_rrf_retrieval() {
 
     println!("case\tlexical\tsemantic\trrf\tquery");
     for case in &cases {
-        let expected = ids.get(case.key).expect("case should reference seeded memory");
+        let expected = ids
+            .get(case.key)
+            .expect("case should reference seeded memory");
         let lexical = context_ids(&db, case.query);
         let semantic = semantic_ids(&db, case.query);
 
