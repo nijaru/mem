@@ -15,7 +15,9 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use usage::{Args, Cli, Subcommands};
 
-use crate::embedding_worker::{EMBEDDING_MODEL_ID, EmbeddingRunOptions, embed_query, model_cache_dir};
+use crate::embedding_worker::{
+    EMBEDDING_MODEL_ID, EmbeddingRunOptions, embed_query, model_cache_dir,
+};
 use crate::episode::{NewEpisode, NewEpisodeEntry};
 use crate::project::ProjectContext;
 use crate::store::{
@@ -744,11 +746,7 @@ fn run(cli: MemCli) -> Result<()> {
                             .map_or("global", |project| project);
                         println!(
                             "{}\t{}\t{}\t{:.6}\t{}",
-                            hit.memory.id,
-                            hit.memory.kind,
-                            scope,
-                            hit.score,
-                            hit.memory.text
+                            hit.memory.id, hit.memory.kind, scope, hit.score, hit.memory.text
                         );
                     }
                 }
