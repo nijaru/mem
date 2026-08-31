@@ -50,9 +50,17 @@ Inside Pi, perform these steps:
   1. Ask: What is the mem Pi smoke sentinel? Answer with only the value.
      Expected: cobalt-otter-731
   2. Ask: Run `pwd` with the bash tool, then tell me you ran it.
-  3. Run: /compact smoke test
-  4. Ask the sentinel question again. Expected: cobalt-otter-731
-  5. Run: /quit
+  3. Ask: Run this exact command with the bash tool, then reply only with "done":
+       head -c 45000 /dev/zero | tr '\0' 'a'
+  4. Ask: Run this exact command with the bash tool, then reply only with "done":
+       head -c 33000 /dev/urandom | base64
+     These two turns raise the session past Pi's compaction minimum
+     (keepRecentTokens defaults to 20000), so the next step can compact.
+  5. Run: /compact smoke test
+     If Pi reports "Nothing to compact (session too small)", repeat step 4
+     once and try again before treating this as a failure.
+  6. Ask the sentinel question again. Expected: cobalt-otter-731
+  7. Run: /quit
 EOF
 
 pi \
