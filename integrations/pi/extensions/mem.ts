@@ -83,7 +83,7 @@ export default function memExtension(pi: ExtensionAPI) {
   const ensureEpisode = async (ctx: ExtensionContext) => {
     const sessionFile = ctx.sessionManager.getSessionFile();
     const sessionId = ctx.sessionManager.getSessionId();
-    const sourceRef = sessionFile ?? `pi-session:${sessionId}`;
+    const sourceRef = `pi-session:${sessionId}`;
 
     if (episodeId && episodeSourceRef === sourceRef) return;
 
