@@ -46,7 +46,8 @@ impl Store {
                    AND m.status = 'active'\n\
                    AND (m.project_id IS NULL OR m.project_id = ?2)",
             )?;
-            let rows = statement.query_map(params![model, project_id], vector_candidate_from_row)?;
+            let rows =
+                statement.query_map(params![model, project_id], vector_candidate_from_row)?;
             for row in rows {
                 candidates.push(row?);
             }
