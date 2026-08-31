@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 const MEM_BIN = process.env.MEM_BIN?.trim() || "mem";
+const MEM_DB = process.env.MEM_DB?.trim();
 const RECALL_LIMIT = 8;
 const MAX_EPISODE_TEXT_BYTES = 16 * 1024;
 const COMMAND_TIMEOUT_MS = 15_000;
@@ -68,7 +69,10 @@ export default function memExtension(pi: ExtensionAPI) {
     args: string[],
     timeout = COMMAND_TIMEOUT_MS,
   ): Promise<T> => {
-    const result = await pi.exec(MEM_BIN, ["--json", ...args], {
+    const globalArgs = ["--json"];
+    if (MEM_DB) globalArgs.push("--db", MEM_DB);
+
+    const result = await pi.exec(MEM_BIN, [...globalArgs, ...args], {
       cwd: ctx.cwd,
       signal: ctx.signal,
       timeout,
