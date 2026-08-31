@@ -7,6 +7,7 @@ on:
     paths:
       - .github/workflows/retrieval-eval.yml
       - tests/retrieval_eval.rs
+      - tests/real_corpus_eval.rs
       - Cargo.toml
       - src/embedding.rs
       - src/embedding_worker.rs
@@ -35,3 +36,5 @@ jobs:
           key: fastembed-5.3.0-bge-small-en-v1.5-q-${{ runner.os }}-${{ runner.arch }}
       - name: Run retrieval evaluation
         run: cargo test --test retrieval_eval -- --ignored --nocapture
+      - name: Run real-corpus retrieval evaluation
+        run: cargo test --test real_corpus_eval -- --ignored --nocapture
