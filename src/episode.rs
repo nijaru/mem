@@ -487,7 +487,7 @@ mod tests {
         let record = store.get_episode(&episode.id).expect("read episode");
         assert_eq!(record.entries.len(), 1);
         assert_eq!(record.entries[0].source_ref, "entry-7");
-        assert_eq!(store.stats().expect("read stats").schema_version, 2);
+        assert_eq!(store.stats().expect("read stats").schema_version, 3);
 
         drop(store);
         cleanup(&path);
@@ -503,7 +503,7 @@ mod tests {
         drop(connection);
 
         let store = Store::open(&path).expect("migrate v1 database");
-        assert_eq!(store.stats().expect("read stats").schema_version, 2);
+        assert_eq!(store.stats().expect("read stats").schema_version, 3);
         drop(store);
         cleanup(&path);
     }
