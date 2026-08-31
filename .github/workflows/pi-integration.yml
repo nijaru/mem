@@ -22,8 +22,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: integrations/pi/package-lock.json
       - name: Install dependencies
         run: npm install --ignore-scripts --package-lock-only && npm ci --ignore-scripts
       - name: Typecheck
