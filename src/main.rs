@@ -14,7 +14,7 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use usage::{Args, Cli, Subcommands};
 
-use crate::embedding_worker::{EmbeddingRunOptions, default_embedding_threads, model_cache_dir};
+use crate::embedding_worker::{EmbeddingRunOptions, model_cache_dir};
 use crate::episode::{NewEpisode, NewEpisodeEntry};
 use crate::project::ProjectContext;
 use crate::store::{
@@ -391,10 +391,6 @@ struct IndexRun {
     /// Maximum number of jobs to process in this invocation.
     #[usage(short = 'n', long)]
     limit: Option<usize>,
-
-    /// Maximum ONNX Runtime intra-op CPU threads.
-    #[usage(long)]
-    threads: Option<usize>,
 
     /// Lease duration in seconds while model loading and inference run.
     #[usage(long)]
@@ -881,10 +877,6 @@ fn run(cli: MemCli) -> Result<()> {
             IndexSubcommand::Run(command) => {
                 let stats = store.run_embedding_jobs(EmbeddingRunOptions {
                     limit: command.limit.unwrap_or(64).min(1000),
-                    threads: command
-                        .threads
-                        .unwrap_or_else(default_embedding_threads)
-                        .min(256),
                     lease_duration: Duration::from_secs(
                         command.lease_seconds.unwrap_or(1800).min(86_400),
                     ),
