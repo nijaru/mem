@@ -7,6 +7,13 @@
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
   },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.84.4",
+    "typescript": "5.9.3"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
   "pi": {
     "extensions": ["./extensions/mem.ts"]
   }
