@@ -122,7 +122,7 @@ fn normalize(vector: &[f32]) -> Result<Vec<f32>> {
 }
 
 fn encode_vector(vector: &[f32]) -> Vec<u8> {
-    let mut encoded = Vec::with_capacity(vector.len() * size_of::<f32>());
+    let mut encoded = Vec::with_capacity(std::mem::size_of_val(vector));
     for value in vector {
         encoded.extend_from_slice(&value.to_le_bytes());
     }
@@ -358,10 +358,9 @@ mod tests {
     }
 
     fn decode(bytes: &[u8]) -> Vec<f32> {
-        bytes
-            .chunks_exact(size_of::<f32>())
-            .map(|chunk| f32::from_le_bytes(chunk.try_into().expect("four bytes")))
-            .collect()
+        let (chunks, remainder) = bytes.as_chunks::<4>();
+        assert!(remainder.is_empty());
+        chunks.iter().map(|chunk| f32::from_le_bytes(*chunk)).collect()
     }
 
     fn test_path() -> std::path::PathBuf {
