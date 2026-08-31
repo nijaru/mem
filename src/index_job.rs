@@ -218,7 +218,7 @@ mod tests {
     use crate::store::NewMemory;
 
     #[test]
-    fn canonical_writes_enqueue_and_completion_removes_jobs() {
+    fn canonical_writes_enqueue_embedding_jobs_and_require_results() {
         let path = test_path();
         let mut store = Store::open(&path).expect("open test store");
         let memory = store
@@ -242,21 +242,24 @@ mod tests {
         assert_eq!(claimed.len(), 1);
         assert_eq!(claimed[0].entity_type, "memory");
         assert_eq!(claimed[0].entity_id, memory.id);
+        assert_eq!(claimed[0].index_kind, "embedding");
         assert_eq!(claimed[0].generation, 1);
         assert_eq!(claimed[0].attempts, 1);
 
+        let error = store
+            .complete_index_job(
+                &claimed[0].id,
+                claimed[0].generation,
+                &claimed[0].lease_token,
+            )
+            .expect_err("bare completion must not discard embedding work");
         assert!(
-            store
-                .complete_index_job(
-                    &claimed[0].id,
-                    claimed[0].generation,
-                    &claimed[0].lease_token,
-                )
-                .expect("complete job")
+            format!("{error:#}")
+                .contains("embedding job cannot complete without a persisted result")
         );
-        let stats = store.index_job_stats().expect("read completed stats");
+        let stats = store.index_job_stats().expect("read protected stats");
         assert_eq!(stats.pending, 0);
-        assert_eq!(stats.running, 0);
+        assert_eq!(stats.running, 1);
 
         drop(store);
         cleanup(&path);
@@ -417,7 +420,7 @@ mod tests {
         drop(connection);
 
         let store = Store::open(&path).expect("migrate v2 database");
-        assert_eq!(store.stats().expect("read store stats").schema_version, 3);
+        assert_eq!(store.stats().expect("read store stats").schema_version, 4);
         let stats = store.index_job_stats().expect("read job stats");
         assert_eq!(stats.pending, 2);
         assert_eq!(stats.running, 0);
