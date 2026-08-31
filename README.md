@@ -2,13 +2,13 @@
 
 `mem` is a local memory CLI for agents.
 
-The project is agent-runtime agnostic: the Rust CLI owns durable storage, retrieval, project/workspace identity, continuation state, and source-backed episodic history, while integrations such as Pi stay thin lifecycle adapters over the same core.
+The project is agent-runtime agnostic: the Rust CLI owns durable storage, retrieval, project/workspace identity, continuation state, source-backed episodic history, and durable derived-index scheduling, while integrations such as Pi stay thin lifecycle adapters over the same core.
 
 ## Status
 
-Early development. The current core provides durable semantic memory, non-destructive correction/supersession, SQLite FTS5 retrieval, automatic Git project/workspace identity, compact continuation state, adapter-facing `context` retrieval, and source-backed episodic history.
+Early development. The current core provides durable semantic memory, non-destructive correction/supersession, SQLite FTS5 retrieval, automatic Git project/workspace identity, compact continuation state, adapter-facing `context` retrieval, source-backed episodic history, and a crash-safe derived-index queue.
 
-Embeddings, automatic memory construction, and agent adapters are still intentionally deferred.
+The actual local embedding model/vector retrieval and agent adapters are still intentionally deferred.
 
 ## Design
 
@@ -18,10 +18,11 @@ Embeddings, automatic memory construction, and agent adapters are still intentio
 - **Corrections preserve history.** Replacements supersede active memories atomically instead of mutating or discarding prior evidence.
 - **Episodes index original sources rather than replacing them.** Search hits retain both the source/session reference and the exact source-local entry reference.
 - **FTS is immediate.** SQLite FTS5 is updated with semantic and episodic writes, so retrieval works without an embedding model.
-- **Embeddings are derived data.** Vector indexing will be incremental/background work and must not be required for correctness.
+- **Embeddings are derived data.** Canonical writes transactionally enqueue durable derived work; vector construction is allowed to lag or fail without affecting correctness.
+- **Derived workers are fenced.** Generation numbers and opaque lease tokens prevent stale workers from completing work after the canonical source changed.
 - **Project knowledge and workspace state have different scope.** Durable semantic memory is project/origin scoped; continuation is project + branch/detached-workspace scoped. Episodes can retain both project and workspace identity without making history itself the continuation cursor.
-- **No daemon is required.** A warm stdio service may be added for agent integrations when it materially reduces model/index startup cost.
-- **Sync is not part of the initial storage contract.** Stable IDs, timestamps, tombstones, relations, source references, and migrations preserve room for it later.
+- **No daemon is required.** The queue has a one-shot worker protocol; a warm stdio service may be added only when it materially reduces model/index startup cost.
+- **Sync is not part of the initial storage contract.** Stable IDs, timestamps, tombstones, relations, source references, generations, and migrations preserve room for it later.
 
 ## Build
 
@@ -89,6 +90,12 @@ mem episode get <episode-id>
 # Search episode entries while retaining exact source backreferences.
 mem history "publication handoff"
 
+# Low-level derived-index worker protocol.
+mem index status
+mem index claim worker-1 --json
+mem index complete <job-id> <generation> <lease-token>
+mem index retry <job-id> <generation> <lease-token> "temporary failure"
+
 # Includes provenance and semantic relations such as superseded_by.
 mem get <id-or-prefix>
 mem forget <id-or-prefix>
@@ -128,7 +135,7 @@ This keeps durable project memory shared across branches while preventing indepe
 
 Superseded and deleted memories are retained in canonical storage but excluded from active search/recall.
 
-Current lexical retrieval does not perform stemming, semantic expansion, or embedding search. Those belong to later hybrid retrieval rather than being hidden inside the baseline.
+Current retrieval remains lexical. The derived-index queue is present, but vector generation and hybrid ranking have not yet been enabled.
 
 ## Corrections and relations
 
@@ -159,7 +166,20 @@ Each `mem episode record` entry stores:
 
 Recording the same `(episode, source_ref)` again refreshes that indexed entry rather than creating a duplicate. `mem history` searches entry text with FTS5 `AND` and returns both the episode-level source reference and the exact entry-level source reference, so an adapter can progressively disclose the original evidence.
 
-Opening an existing schema-v1 database migrates it to schema v2 in place. The migration and exact-source-backreference behavior are covered by tests.
+## Durable derived indexing
+
+Schema v3 adds a durable queue for derived embedding work. Active semantic memories and episode entries are backfilled during migration, and future canonical writes enqueue or invalidate work through SQLite triggers in the same transaction as the source change.
+
+A job has a stable entity key plus a monotonically increasing generation. Claims add an opaque lease token and expiry. This provides four important guarantees:
+
+- a crash leaves running work reclaimable after lease expiry;
+- a source update requeues the same entity at a newer generation;
+- stale generations/lease tokens cannot complete newer work;
+- retry can release a lease and defer the next claim without losing the diagnostic.
+
+`mem index status|claim|complete|retry` is a low-level one-shot protocol for index workers and integrations. Normal memory workflows do not need to call it directly.
+
+Opening older databases migrates sequentially through schema versions 1 → 2 → 3. Migration/backfill, enqueue, completion, stale-generation fencing, expired-lease recovery, and delayed retry are covered by tests.
 
 ## Data location
 
@@ -189,9 +209,10 @@ Memory status is one of `active`, `superseded`, or `deleted`. `mem status` repor
 
 The next qualified slices are expected to be:
 
-1. durable background indexing jobs and local embeddings;
-2. hybrid FTS/vector retrieval;
-3. a thin Pi extension, with a warm `mem serve --stdio` mode only if it materially helps latency.
+1. vector storage and stale-safe embedding result commit semantics;
+2. a local embedding worker over the qualified queue;
+3. exact vector retrieval followed by measured hybrid FTS/vector ranking;
+4. a thin Pi extension, with a warm `mem serve --stdio` mode only if it materially helps latency.
 
 ANN indexes, automatic LLM memory promotion, sync protocols, and custom database backends remain deferred until measured requirements justify them.
 
