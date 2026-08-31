@@ -14,6 +14,35 @@ CREATE TABLE embeddings (
 CREATE INDEX embeddings_model_entity_idx
     ON embeddings (model, entity_type, entity_id);
 
+-- A running embedding job may only be acknowledged while its canonical source
+-- remains eligible if the exact generation has first produced a vector. Source
+-- deletion/supersession is still allowed to cancel the job because the source
+-- is no longer eligible when the v3 cancellation trigger deletes it.
+CREATE TRIGGER index_jobs_embedding_requires_result_before_delete
+BEFORE DELETE ON index_jobs
+WHEN old.index_kind = 'embedding'
+  AND old.state = 'running'
+  AND (
+      (old.entity_type = 'memory' AND EXISTS (
+          SELECT 1 FROM memories AS m
+          WHERE m.id = old.entity_id AND m.status = 'active'
+      ))
+      OR
+      (old.entity_type = 'episode_entry' AND EXISTS (
+          SELECT 1 FROM episode_entries AS ee
+          WHERE ee.id = old.entity_id
+      ))
+  )
+  AND NOT EXISTS (
+      SELECT 1 FROM embeddings AS emb
+      WHERE emb.entity_type = old.entity_type
+        AND emb.entity_id = old.entity_id
+        AND emb.source_generation = old.generation
+  )
+BEGIN
+    SELECT RAISE(ABORT, 'embedding job cannot complete without a persisted result');
+END;
+
 -- A canonical source change makes all previous vectors for that entity stale
 -- immediately. The v3 queue triggers independently advance/requeue the job.
 CREATE TRIGGER memories_embedding_invalidate_active_update
