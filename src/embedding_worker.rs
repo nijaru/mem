@@ -11,7 +11,8 @@ use uuid::Uuid;
 use crate::index_job::ClaimedIndexJob;
 use crate::store::Store;
 
-pub const EMBEDDING_MODEL_ID: &str = "Qdrant/bge-small-en-v1.5-onnx-Q";
+pub const EMBEDDING_MODEL_ID: &str =
+    "fastembed-6.0.2:Qdrant/bge-small-en-v1.5-onnx-Q/model_optimized.onnx";
 
 pub struct EmbeddingRunOptions {
     pub limit: usize,
@@ -181,6 +182,13 @@ impl Store {
 }
 
 pub fn model_cache_dir() -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os("HF_HOME") {
+        let path = PathBuf::from(path);
+        if path.as_os_str().is_empty() {
+            bail!("HF_HOME cannot be empty");
+        }
+        return Ok(path);
+    }
     if let Some(path) = std::env::var_os("MEM_MODEL_CACHE") {
         let path = PathBuf::from(path);
         if path.as_os_str().is_empty() {
