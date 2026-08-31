@@ -184,9 +184,9 @@ mod tests {
     fn exact_scan_scores_current_model_and_scope() {
         let path = test_path();
         let mut store = Store::open(&path).expect("open test store");
-        let global = remember(&store, "global candidate", None);
-        let alpha = remember(&store, "alpha candidate", Some("alpha"));
-        let beta = remember(&store, "beta candidate", Some("beta"));
+        let global = remember(&mut store, "global candidate", None);
+        let alpha = remember(&mut store, "alpha candidate", Some("alpha"));
+        let beta = remember(&mut store, "beta candidate", Some("beta"));
 
         let jobs = store
             .claim_index_jobs("worker", 3, Duration::from_secs(30))
@@ -232,7 +232,7 @@ mod tests {
         cleanup(&path);
     }
 
-    fn remember(store: &Store, text: &str, project_id: Option<&str>) -> crate::store::Memory {
+    fn remember(store: &mut Store, text: &str, project_id: Option<&str>) -> crate::store::Memory {
         store
             .remember(NewMemory {
                 text: text.to_owned(),
