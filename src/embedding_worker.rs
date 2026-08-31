@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -39,12 +39,7 @@ impl Store {
         options: EmbeddingRunOptions,
     ) -> Result<EmbeddingRunStats> {
         validate_options(&options)?;
-        fs::create_dir_all(&options.cache_dir).with_context(|| {
-            format!(
-                "create embedding model cache {}",
-                options.cache_dir.display()
-            )
-        })?;
+        ensure_cache_dir(&options.cache_dir)?;
 
         let worker_id = format!("mem-{}", Uuid::now_v7());
         let jobs = self.claim_index_jobs(&worker_id, options.limit, options.lease_duration)?;
@@ -77,13 +72,10 @@ impl Store {
             return Ok(stats);
         }
 
-        let init_options = TextInitOptions::new(EmbeddingModel::BGESmallENV15Q)
-            .with_cache_dir(options.cache_dir)
-            .with_show_download_progress(options.show_download_progress);
-        let mut model = match TextEmbedding::try_new(init_options) {
+        let mut model = match load_model(&options.cache_dir, options.show_download_progress) {
             Ok(model) => model,
             Err(error) => {
-                let message = format!("embedding model initialization failed: {error}");
+                let message = format!("embedding model initialization failed: {error:#}");
                 stats.retried += self.retry_embedding_work(&work, &message, options.retry_delay)?;
                 bail!(message);
             }
@@ -183,6 +175,26 @@ impl Store {
     }
 }
 
+pub fn embed_query(query: &str, cache_dir: &Path, show_download_progress: bool) -> Result<Vec<f32>> {
+    if query.trim().is_empty() {
+        bail!("semantic search query cannot be empty");
+    }
+    ensure_cache_dir(cache_dir)?;
+    let mut model = load_model(cache_dir, show_download_progress)?;
+    let mut embeddings = model
+        .embed(vec![query], Some(1))
+        .context("embedding semantic search query")?;
+    if embeddings.len() != 1 {
+        bail!(
+            "embedding inference returned {} vectors for one search query",
+            embeddings.len()
+        );
+    }
+    embeddings
+        .pop()
+        .context("embedding inference returned no query vector")
+}
+
 pub fn model_cache_dir() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("HF_HOME") {
         let path = PathBuf::from(path);
@@ -201,6 +213,19 @@ pub fn model_cache_dir() -> Result<PathBuf> {
 
     let cache_dir = dirs::cache_dir().context("could not determine the local cache directory")?;
     Ok(cache_dir.join("mem").join("models"))
+}
+
+fn load_model(cache_dir: &Path, show_download_progress: bool) -> Result<TextEmbedding> {
+    let init_options = TextInitOptions::new(EmbeddingModel::BGESmallENV15Q)
+        .with_cache_dir(cache_dir.to_owned())
+        .with_show_download_progress(show_download_progress);
+    TextEmbedding::try_new(init_options).context("initialize local embedding model")
+}
+
+fn ensure_cache_dir(cache_dir: &Path) -> Result<()> {
+    fs::create_dir_all(cache_dir)
+        .with_context(|| format!("create embedding model cache {}", cache_dir.display()))?;
+    Ok(())
 }
 
 fn validate_options(options: &EmbeddingRunOptions) -> Result<()> {
