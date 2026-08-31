@@ -16,7 +16,6 @@ pub const EMBEDDING_MODEL_ID: &str =
 
 pub struct EmbeddingRunOptions {
     pub limit: usize,
-    pub threads: usize,
     pub lease_duration: Duration,
     pub retry_delay: Duration,
     pub cache_dir: PathBuf,
@@ -80,7 +79,6 @@ impl Store {
 
         let init_options = TextInitOptions::new(EmbeddingModel::BGESmallENV15Q)
             .with_cache_dir(options.cache_dir)
-            .with_intra_threads(options.threads)
             .with_show_download_progress(options.show_download_progress);
         let mut model = match TextEmbedding::try_new(init_options) {
             Ok(model) => model,
@@ -92,7 +90,8 @@ impl Store {
         };
 
         let texts: Vec<&str> = work.iter().map(|(_, text)| text.as_str()).collect();
-        let embeddings = match model.embed(&texts, Some(texts.len())) {
+        let batch_size = texts.len();
+        let embeddings = match model.embed(texts, Some(batch_size)) {
             Ok(embeddings) => embeddings,
             Err(error) => {
                 let message = format!("embedding inference failed: {error}");
@@ -204,18 +203,9 @@ pub fn model_cache_dir() -> Result<PathBuf> {
     Ok(cache_dir.join("mem").join("models"))
 }
 
-pub fn default_embedding_threads() -> usize {
-    std::thread::available_parallelism()
-        .map(|threads| threads.get().min(4))
-        .unwrap_or(1)
-}
-
 fn validate_options(options: &EmbeddingRunOptions) -> Result<()> {
     if options.limit == 0 {
         bail!("embedding worker limit must be greater than zero");
-    }
-    if options.threads == 0 {
-        bail!("embedding worker thread count must be greater than zero");
     }
     if options.lease_duration.is_zero() {
         bail!("embedding worker lease duration must be greater than zero");
