@@ -199,6 +199,55 @@ pub fn embed_query(
         .context("embedding inference returned no query vector")
 }
 
+/// Embed a query only when the embedding model is already fully cached.
+/// Adapter-facing recall must never trigger a model download: a fresh machine
+/// falls back to lexical retrieval instead of blocking on the network.
+pub fn embed_query_if_cached(query: &str, cache_dir: &Path) -> Result<Option<Vec<f32>>> {
+    if query.trim().is_empty() {
+        bail!("semantic recall query cannot be empty");
+    }
+    if !model_is_cached(cache_dir) {
+        return Ok(None);
+    }
+    embed_query(query, cache_dir, false).map(Some)
+}
+
+const EMBEDDING_MODEL_REPO: &str = "Qdrant/bge-small-en-v1.5-onnx-Q";
+const EMBEDDING_MODEL_FILES: [&str; 5] = [
+    "model_optimized.onnx",
+    "tokenizer.json",
+    "config.json",
+    "special_tokens_map.json",
+    "tokenizer_config.json",
+];
+
+/// Mirrors the fastembed/hf-hub cache layout: one snapshot directory holds all
+/// model files, addressed by refs/<revision>.
+fn model_is_cached(cache_dir: &Path) -> bool {
+    let snapshot = cached_model_snapshot(cache_dir);
+    EMBEDDING_MODEL_FILES.iter().all(|file| {
+        snapshot
+            .as_deref()
+            .map(|snapshot| snapshot.join(file).is_file())
+            .unwrap_or(false)
+    })
+}
+
+fn cached_model_snapshot(cache_dir: &Path) -> Option<std::path::PathBuf> {
+    // hf-hub cache layout: the repo folder is one path component,
+    // e.g. models--Qdrant--bge-small-en-v1.5-onnx-Q.
+    let repo_dir = cache_dir.join(format!(
+        "models--{}",
+        EMBEDDING_MODEL_REPO.replace('/', "--")
+    ));
+    let commit = std::fs::read_to_string(repo_dir.join("refs").join("main")).ok()?;
+    let commit = commit.trim();
+    if commit.is_empty() {
+        return None;
+    }
+    Some(repo_dir.join("snapshots").join(commit))
+}
+
 pub fn model_cache_dir() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("HF_HOME") {
         let path = PathBuf::from(path);
@@ -248,7 +297,9 @@ mod tests {
 
     use uuid::Uuid;
 
-    use super::Store;
+    use super::{
+        EMBEDDING_MODEL_FILES, EMBEDDING_MODEL_ID, EMBEDDING_MODEL_REPO, Store, model_is_cached,
+    };
     use crate::episode::{NewEpisode, NewEpisodeEntry};
     use crate::store::NewMemory;
 
@@ -322,6 +373,42 @@ mod tests {
 
         drop(store);
         cleanup(&path);
+    }
+
+    #[test]
+    fn model_id_matches_cached_repo_layout() {
+        // EMBEDDING_MODEL_ID is the vector-store key derived from the same
+        // repo and file the cache-presence check must recognize.
+        let repo = "Qdrant/bge-small-en-v1.5-onnx-Q";
+        let model_file = "model_optimized.onnx";
+        assert_eq!(
+            EMBEDDING_MODEL_ID,
+            format!("fastembed-5.3.0:{repo}/{model_file}")
+        );
+        assert_eq!(EMBEDDING_MODEL_REPO, repo);
+        assert_eq!(EMBEDDING_MODEL_FILES[0], model_file);
+    }
+
+    #[test]
+    fn cache_presence_check_uses_hf_hub_layout() {
+        let dir = std::env::temp_dir().join(format!("mem-model-cache-test-{}", Uuid::now_v7()));
+        let repo_dir = dir.join("models--Qdrant--bge-small-en-v1.5-onnx-Q");
+        let refs_dir = repo_dir.join("refs");
+        let snapshot = repo_dir.join("snapshots").join("abc123");
+        std::fs::create_dir_all(&refs_dir).expect("create refs dir");
+        std::fs::create_dir_all(&snapshot).expect("create snapshot dir");
+        std::fs::write(refs_dir.join("main"), "abc123\n").expect("write ref");
+
+        assert!(!model_is_cached(&dir));
+        for file in EMBEDDING_MODEL_FILES {
+            std::fs::write(snapshot.join(file), "stub").expect("write model file");
+        }
+        assert!(model_is_cached(&dir));
+
+        std::fs::remove_file(snapshot.join(EMBEDDING_MODEL_FILES[0])).expect("remove model file");
+        assert!(!model_is_cached(&dir));
+
+        std::fs::remove_dir_all(&dir).expect("remove cache dir");
     }
 
     fn test_path() -> std::path::PathBuf {

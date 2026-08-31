@@ -16,12 +16,13 @@ use serde::Serialize;
 use usage::{Args, Cli, Subcommands};
 
 use crate::embedding_worker::{
-    EMBEDDING_MODEL_ID, EmbeddingRunOptions, embed_query, model_cache_dir,
+    EMBEDDING_MODEL_ID, EmbeddingRunOptions, embed_query, embed_query_if_cached, model_cache_dir,
 };
 use crate::episode::{NewEpisode, NewEpisodeEntry};
 use crate::project::ProjectContext;
 use crate::store::{
-    Memory, MemorySource, NewCorrection, NewMemory, NewWorkspaceState, Store, WorkspaceState,
+    Memory, MemorySource, NewCorrection, NewMemory, NewWorkspaceState, SearchHit, Store,
+    WorkspaceState,
 };
 
 #[derive(Cli)]
@@ -159,6 +160,10 @@ struct ContextCommand {
     /// Maximum number of semantic memories.
     #[usage(short = 'n', long)]
     limit: Option<usize>,
+
+    /// Force FTS5 lexical recall instead of semantic-first ranking.
+    #[usage(long)]
+    lexical: bool,
 }
 
 /// Store one durable semantic memory.
@@ -657,11 +662,8 @@ fn run(cli: MemCli) -> Result<()> {
                 None
             };
             let project_id = project.as_ref().map(|project| project.project_id.as_str());
-            let hits = store.recall(
-                &command.query,
-                project_id,
-                command.limit.unwrap_or(10).clamp(1, 100),
-            )?;
+            let limit = command.limit.unwrap_or(10).clamp(1, 100);
+            let hits = recall_hits(&store, &command.query, project_id, limit, command.lexical)?;
             let mut memories = Vec::with_capacity(hits.len());
             for hit in hits {
                 let record = store.get(&hit.memory.id)?;
@@ -1079,6 +1081,47 @@ fn memory_project(explicit: Option<&str>, global: bool) -> Result<Option<String>
     }
 
     Ok(ProjectContext::detect(None, None)?.map(|context| context.project_id))
+}
+
+/// Semantic-first recall with lexical-OR fallback for `mem context`.
+/// Embeddings are a derived enhancement: when the model is not cached, the
+/// cache directory cannot be determined, nothing in scope is embedded yet,
+/// or local embedding fails, recall degrades to the FTS5 baseline without
+/// touching the network or failing the command.
+fn recall_hits(
+    store: &Store,
+    query: &str,
+    project_id: Option<&str>,
+    limit: usize,
+    force_lexical: bool,
+) -> Result<Vec<SearchHit>> {
+    if !force_lexical
+        && store.has_scope_embeddings(EMBEDDING_MODEL_ID, project_id)?
+        && let Some(query_vector) = cached_query_vector(query)?
+    {
+        let hits = store.semantic_search_by_vector(
+            &query_vector,
+            EMBEDDING_MODEL_ID,
+            project_id,
+            limit,
+        )?;
+        return Ok(hits
+            .into_iter()
+            .map(|hit| SearchHit {
+                memory: hit.memory,
+                rank: hit.score,
+            })
+            .collect());
+    }
+    store.recall(query, project_id, limit)
+}
+
+fn cached_query_vector(query: &str) -> Result<Option<Vec<f32>>> {
+    let Ok(cache_dir) = model_cache_dir() else {
+        return Ok(None);
+    };
+    // Fail open: a cached-but-broken model must not break adapter recall.
+    Ok(embed_query_if_cached(query, &cache_dir).unwrap_or(None))
 }
 
 fn print_context(output: &ContextOutput) {

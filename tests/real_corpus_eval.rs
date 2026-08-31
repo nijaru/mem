@@ -88,14 +88,16 @@ fn compare_retrieval_on_real_corpus() {
     let mut lexical_metrics = Metrics::default();
     let mut semantic_metrics = Metrics::default();
     let mut equal_rrf_metrics = Metrics::default();
+    let mut context_default_metrics = Metrics::default();
 
-    println!("case\tlexical\tsemantic\trrf\tquery");
+    println!("case\tlexical\tsemantic\trrf\tcontext-default\tquery");
     for case in &cases {
         let expected = ids
             .get(case.key)
             .expect("case should reference seeded memory");
-        let lexical = context_ids(&db, case.query);
+        let lexical = context_ids(&db, case.query, true);
         let semantic = semantic_ids(&db, case.query);
+        let context_default = context_ids(&db, case.query, false);
 
         assert!(
             !lexical.contains(distractor_id),
@@ -110,25 +112,34 @@ fn compare_retrieval_on_real_corpus() {
         let lexical_rank = rank_of(&lexical, expected);
         let semantic_rank = rank_of(&semantic, expected);
         let equal_rrf_rank = rank_of(&equal_rrf, expected);
+        let context_default_rank = rank_of(&context_default, expected);
+
+        assert!(
+            !context_default.contains(distractor_id),
+            "default context ranking leaked cross-project memory"
+        );
 
         lexical_metrics.observe(lexical_rank);
         semantic_metrics.observe(semantic_rank);
         equal_rrf_metrics.observe(equal_rrf_rank);
+        context_default_metrics.observe(context_default_rank);
 
         println!(
-            "{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}",
             case.key,
             display_rank(lexical_rank),
             display_rank(semantic_rank),
             display_rank(equal_rrf_rank),
+            display_rank(context_default_rank),
             case.query
         );
     }
 
     println!();
-    lexical_metrics.print("lexical-or (current context)");
-    semantic_metrics.print("semantic");
+    lexical_metrics.print("lexical-or (context --lexical)");
+    semantic_metrics.print("semantic (search --semantic)");
     equal_rrf_metrics.print("rrf (candidate context)");
+    context_default_metrics.print("context default (semantic-first)");
 
     cleanup(&db);
 }
@@ -335,22 +346,22 @@ fn remember(db: &Path, seed: &Seed<'_>) -> Value {
     run_json(db, &refs)
 }
 
-fn context_ids(db: &Path, query: &str) -> Vec<String> {
+fn context_ids(db: &Path, query: &str, lexical: bool) -> Vec<String> {
     let limit = LIMIT.to_string();
-    let output = run_json(
-        db,
-        &[
-            "context",
-            query,
-            "--project",
-            PROJECT,
-            "--workspace",
-            WORKSPACE,
-            "-n",
-            &limit,
-        ],
-    );
-    output["memories"]
+    let mut args = vec![
+        "context",
+        query,
+        "--project",
+        PROJECT,
+        "--workspace",
+        WORKSPACE,
+        "-n",
+        limit.as_str(),
+    ];
+    if lexical {
+        args.push("--lexical");
+    }
+    run_json(db, &args)["memories"]
         .as_array()
         .expect("context memories array")
         .iter()

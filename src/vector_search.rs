@@ -19,6 +19,27 @@ struct VectorCandidate {
 }
 
 impl Store {
+    /// Whether any active memory visible in this scope has a stored vector for
+    /// the model. Adapter-facing semantic-first recall uses this to distinguish
+    /// "ranking is possible" from "nothing embedded yet".
+    pub fn has_scope_embeddings(&self, model: &str, project_id: Option<&str>) -> Result<bool> {
+        if model.trim().is_empty() {
+            bail!("embedding model identifier cannot be empty");
+        }
+        let count: i64 = self.connection.query_row(
+            "SELECT COUNT(*)
+             FROM embeddings AS e
+             JOIN memories AS m ON m.id = e.entity_id
+             WHERE e.entity_type = 'memory'
+               AND e.model = ?1
+               AND m.status = 'active'
+               AND (m.project_id IS NULL OR m.project_id = ?2)",
+            params![model, project_id],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
     pub fn semantic_search_by_vector(
         &self,
         query_vector: &[f32],
