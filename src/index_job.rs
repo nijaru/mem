@@ -471,7 +471,13 @@ mod tests {
                 .expect("respect retry delay")
                 .is_empty()
         );
-        let row: (String, Option<String>, Option<String>, Option<i64>, Option<String>) = store
+        let row: (
+            String,
+            Option<String>,
+            Option<String>,
+            Option<i64>,
+            Option<String>,
+        ) = store
             .connection
             .query_row(
                 "SELECT state, lease_owner, lease_token, lease_until, last_error\n\
