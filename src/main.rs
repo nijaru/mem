@@ -1,3 +1,4 @@
+mod embedding;
 mod episode;
 mod index_job;
 mod project;
@@ -372,6 +373,7 @@ struct IndexCommand {
 enum IndexSubcommand {
     Status(IndexStatus),
     Claim(IndexClaim),
+    Commit(IndexCommit),
     Complete(IndexComplete),
     Retry(IndexRetry),
 }
@@ -395,7 +397,26 @@ struct IndexClaim {
     lease_seconds: Option<u64>,
 }
 
-/// Complete one claimed derived-index job.
+/// Commit one embedding result and consume its exact claimed lease.
+#[derive(Args)]
+struct IndexCommit {
+    /// Job identifier.
+    job: String,
+
+    /// Generation claimed by the worker.
+    generation: i64,
+
+    /// Opaque lease token returned by `index claim`.
+    lease_token: String,
+
+    /// Stable embedding model identifier.
+    model: String,
+
+    /// Embedding vector encoded as a JSON array of numbers.
+    vector: String,
+}
+
+/// Complete one claimed non-embedding derived-index job.
 #[derive(Args)]
 struct IndexComplete {
     /// Job identifier.
@@ -855,6 +876,35 @@ fn run(cli: MemCli) -> Result<()> {
                             job.lease_until
                         );
                     }
+                }
+            }
+            IndexSubcommand::Commit(command) => {
+                let vector: Vec<f32> = serde_json::from_str(&command.vector)
+                    .context("embedding vector must be a JSON array of numbers")?;
+                let committed = store.commit_embedding(
+                    &command.job,
+                    command.generation,
+                    &command.lease_token,
+                    &command.model,
+                    &vector,
+                )?;
+                if cli.json {
+                    print_json(&serde_json::json!({
+                        "job": command.job,
+                        "generation": command.generation,
+                        "model": command.model,
+                        "committed": committed
+                    }))?;
+                } else if committed {
+                    println!(
+                        "committed embedding {} generation {} model {}",
+                        command.job, command.generation, command.model
+                    );
+                } else {
+                    println!(
+                        "stale or unowned job {} generation {}",
+                        command.job, command.generation
+                    );
                 }
             }
             IndexSubcommand::Complete(command) => {
