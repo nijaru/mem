@@ -1,0 +1,73 @@
+name: embedding-smoke
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/embedding-smoke.yml
+      - Cargo.toml
+      - src/embedding.rs
+      - src/embedding_worker.rs
+
+permissions:
+  contents: read
+
+jobs:
+  embed:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    env:
+      MEM_MODEL_CACHE: ${{ github.workspace }}/.model-cache
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Cache embedding model
+        uses: actions/cache@v4
+        with:
+          path: .model-cache
+          key: fastembed-6.0.2-bge-small-en-v1.5-q-${{ runner.os }}-${{ runner.arch }}
+      - name: Build
+        run: cargo build --release
+      - name: Run embedding smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          db="$RUNNER_TEMP/mem-smoke.db"
+
+          target/release/mem --db "$db" remember \
+            "Publication handoff uses release/acquire ordering" \
+            --kind decision \
+            --global \
+            --source-type smoke
+
+          run_json="$(target/release/mem --json --db "$db" index run -n 1 --threads 1)"
+          printf '%s\n' "$run_json"
+          RUN_JSON="$run_json" python3 - <<'PY'
+          import json
+          import os
+
+          result = json.loads(os.environ["RUN_JSON"])
+          assert result["claimed"] == 1, result
+          assert result["eligible"] == 1, result
+          assert result["committed"] == 1, result
+          assert result["stale"] == 0, result
+          assert result["retried"] == 0, result
+          PY
+
+          status_json="$(target/release/mem --json --db "$db" index status)"
+          printf '%s\n' "$status_json"
+          STATUS_JSON="$status_json" python3 - <<'PY'
+          import json
+          import os
+
+          status = json.loads(os.environ["STATUS_JSON"])
+          assert status["pending"] == 0, status
+          assert status["running"] == 0, status
+          PY
