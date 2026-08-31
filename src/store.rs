@@ -7,7 +7,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::Serialize;
 use uuid::Uuid;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 const MEMORY_KINDS: &[&str] = &["fact", "decision", "constraint", "preference", "procedure"];
 
 pub struct Store {
@@ -447,6 +447,10 @@ impl Store {
         if self.schema_version()? == 1 {
             self.connection
                 .execute_batch(include_str!("../migrations/0002_episode_entries.sql"))?;
+        }
+        if self.schema_version()? == 2 {
+            self.connection
+                .execute_batch(include_str!("../migrations/0003_index_jobs.sql"))?;
         }
 
         let version = self.schema_version()?;
