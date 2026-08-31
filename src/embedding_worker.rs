@@ -175,7 +175,11 @@ impl Store {
     }
 }
 
-pub fn embed_query(query: &str, cache_dir: &Path, show_download_progress: bool) -> Result<Vec<f32>> {
+pub fn embed_query(
+    query: &str,
+    cache_dir: &Path,
+    show_download_progress: bool,
+) -> Result<Vec<f32>> {
     if query.trim().is_empty() {
         bail!("semantic search query cannot be empty");
     }
