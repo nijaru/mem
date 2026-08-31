@@ -360,7 +360,10 @@ mod tests {
     fn decode(bytes: &[u8]) -> Vec<f32> {
         let (chunks, remainder) = bytes.as_chunks::<4>();
         assert!(remainder.is_empty());
-        chunks.iter().map(|chunk| f32::from_le_bytes(*chunk)).collect()
+        chunks
+            .iter()
+            .map(|chunk| f32::from_le_bytes(*chunk))
+            .collect()
     }
 
     fn test_path() -> std::path::PathBuf {
