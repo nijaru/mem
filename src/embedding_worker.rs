@@ -12,7 +12,7 @@ use crate::index_job::ClaimedIndexJob;
 use crate::store::Store;
 
 pub const EMBEDDING_MODEL_ID: &str =
-    "fastembed-5.17.4:Qdrant/bge-small-en-v1.5-onnx-Q/model_optimized.onnx";
+    "fastembed-5.3.0:Qdrant/bge-small-en-v1.5-onnx-Q/model_optimized.onnx";
 
 pub struct EmbeddingRunOptions {
     pub limit: usize,
