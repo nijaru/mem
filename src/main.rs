@@ -4,6 +4,7 @@ mod episode;
 mod index_job;
 mod project;
 mod store;
+mod vector_search;
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -14,7 +15,7 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use usage::{Args, Cli, Subcommands};
 
-use crate::embedding_worker::{EmbeddingRunOptions, model_cache_dir};
+use crate::embedding_worker::{EMBEDDING_MODEL_ID, EmbeddingRunOptions, embed_query, model_cache_dir};
 use crate::episode::{NewEpisode, NewEpisodeEntry};
 use crate::project::ProjectContext;
 use crate::store::{
@@ -215,7 +216,7 @@ struct Correct {
     source_ref: Option<String>,
 }
 
-/// Search active semantic memory with SQLite FTS5.
+/// Search active semantic memory.
 #[derive(Args)]
 struct Search {
     /// Search query.
@@ -228,6 +229,10 @@ struct Search {
     /// Search only user-wide global memory.
     #[usage(long = "global")]
     global_memory: bool,
+
+    /// Use local embeddings and exact cosine similarity instead of FTS5.
+    #[usage(long)]
+    semantic: bool,
 
     /// Maximum number of results.
     #[usage(short = 'n', long)]
@@ -718,24 +723,51 @@ fn run(cli: MemCli) -> Result<()> {
         }
         Command::Search(command) => {
             let project_id = memory_project(command.project.as_deref(), command.global_memory)?;
-            let hits = store.search(
-                &command.query,
-                project_id.as_deref(),
-                command.limit.unwrap_or(10).clamp(1, 100),
-            )?;
-            if cli.json {
-                print_json(&hits)?;
+            let limit = command.limit.unwrap_or(10).clamp(1, 100);
+            if command.semantic {
+                let cache_dir = model_cache_dir()?;
+                let query_vector = embed_query(&command.query, &cache_dir, !cli.json)?;
+                let hits = store.semantic_search_by_vector(
+                    &query_vector,
+                    EMBEDDING_MODEL_ID,
+                    project_id.as_deref(),
+                    limit,
+                )?;
+                if cli.json {
+                    print_json(&hits)?;
+                } else {
+                    for hit in hits {
+                        let scope = hit
+                            .memory
+                            .project_id
+                            .as_deref()
+                            .map_or("global", |project| project);
+                        println!(
+                            "{}\t{}\t{}\t{:.6}\t{}",
+                            hit.memory.id,
+                            hit.memory.kind,
+                            scope,
+                            hit.score,
+                            hit.memory.text
+                        );
+                    }
+                }
             } else {
-                for hit in hits {
-                    let scope = hit
-                        .memory
-                        .project_id
-                        .as_deref()
-                        .map_or("global", |project| project);
-                    println!(
-                        "{}\t{}\t{}\t{}",
-                        hit.memory.id, hit.memory.kind, scope, hit.memory.text
-                    );
+                let hits = store.search(&command.query, project_id.as_deref(), limit)?;
+                if cli.json {
+                    print_json(&hits)?;
+                } else {
+                    for hit in hits {
+                        let scope = hit
+                            .memory
+                            .project_id
+                            .as_deref()
+                            .map_or("global", |project| project);
+                        println!(
+                            "{}\t{}\t{}\t{}",
+                            hit.memory.id, hit.memory.kind, scope, hit.memory.text
+                        );
+                    }
                 }
             }
         }
