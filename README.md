@@ -2,24 +2,26 @@
 
 `mem` is a local memory CLI for agents.
 
-The project is agent-runtime agnostic: the Rust CLI owns durable storage, retrieval, project/workspace identity, and continuation state, while integrations such as Pi stay thin lifecycle adapters over the same core.
+The project is agent-runtime agnostic: the Rust CLI owns durable storage, retrieval, project/workspace identity, continuation state, and source-backed episodic history, while integrations such as Pi stay thin lifecycle adapters over the same core.
 
 ## Status
 
-Early development. The current core provides durable semantic memory, SQLite FTS5 retrieval, automatic Git project/workspace identity, compact continuation state, and an adapter-facing `context` operation.
+Early development. The current core provides durable semantic memory, non-destructive correction/supersession, SQLite FTS5 retrieval, automatic Git project/workspace identity, compact continuation state, adapter-facing `context` retrieval, and source-backed episodic history.
 
-Episodic indexing, embeddings, automatic memory construction, and agent adapters are still intentionally deferred.
+Embeddings, automatic memory construction, and agent adapters are still intentionally deferred.
 
 ## Design
 
 - **SQLite is canonical.** The database is local, transactional, and portable.
 - **Semantic memory, episodic history, and continuation state are different data.** They do not share one generic log or `MEMORY.md` abstraction.
 - **Provenance is first-class.** A semantic memory records who established it and at least one source type.
-- **FTS is immediate.** SQLite FTS5 is updated with memory writes, so retrieval works without an embedding model.
+- **Corrections preserve history.** Replacements supersede active memories atomically instead of mutating or discarding prior evidence.
+- **Episodes index original sources rather than replacing them.** Search hits retain both the source/session reference and the exact source-local entry reference.
+- **FTS is immediate.** SQLite FTS5 is updated with semantic and episodic writes, so retrieval works without an embedding model.
 - **Embeddings are derived data.** Vector indexing will be incremental/background work and must not be required for correctness.
-- **Project knowledge and workspace state have different scope.** Durable memory is project/origin scoped; continuation is project + branch/detached-workspace scoped.
+- **Project knowledge and workspace state have different scope.** Durable semantic memory is project/origin scoped; continuation is project + branch/detached-workspace scoped. Episodes can retain both project and workspace identity without making history itself the continuation cursor.
 - **No daemon is required.** A warm stdio service may be added for agent integrations when it materially reduces model/index startup cost.
-- **Sync is not part of the initial storage contract.** Stable IDs, timestamps, tombstones, relations, and migrations preserve room for it later.
+- **Sync is not part of the initial storage contract.** Stable IDs, timestamps, tombstones, relations, source references, and migrations preserve room for it later.
 
 ## Build
 
@@ -57,7 +59,12 @@ mem remember "Prefer source evidence over stale summaries" \
   --kind preference \
   --global
 
-# Precise lexical search: all query terms must match a memory.
+# Correct an active memory without destroying its history.
+mem correct <id-or-prefix> "Publication uses release/acquire ordering" \
+  --source-type git \
+  --source-ref def456
+
+# Precise lexical semantic search: all query terms must match a memory.
 mem search "publication ordering"
 
 # Compact per-workspace continuation state.
@@ -71,6 +78,18 @@ mem state clear
 # Adapter-facing retrieval: state + broad semantic recall + provenance.
 mem context "publication handoff"
 
+# Index one original session and exact source-local entries.
+mem episode create pi-session-123 --source-type pi-session
+mem episode record <episode-id> message-42 "Publication handoff succeeded" \
+  --kind message \
+  --role assistant
+mem episode end <episode-id>
+mem episode get <episode-id>
+
+# Search episode entries while retaining exact source backreferences.
+mem history "publication handoff"
+
+# Includes provenance and semantic relations such as superseded_by.
 mem get <id-or-prefix>
 mem forget <id-or-prefix>
 ```
@@ -94,9 +113,9 @@ The default workspace identity is separate:
 
 This keeps durable project memory shared across branches while preventing independent workspaces from overwriting the same continuation cursor.
 
-`--project` and `--workspace` can override detection where supported. `--global` opts memory operations into user-wide scope.
+`--project` and `--workspace` can override detection where supported. `--global` opts supported operations into user-wide/unscoped behavior.
 
-## Retrieval
+## Semantic retrieval
 
 `mem search` is intentionally precise: whitespace-separated terms are combined with FTS5 `AND`.
 
@@ -107,7 +126,40 @@ This keeps durable project memory shared across branches while preventing indepe
 - matching active project + global semantic memories;
 - provenance for each selected memory.
 
+Superseded and deleted memories are retained in canonical storage but excluded from active search/recall.
+
 Current lexical retrieval does not perform stemming, semantic expansion, or embedding search. Those belong to later hybrid retrieval rather than being hidden inside the baseline.
+
+## Corrections and relations
+
+`mem correct` only accepts an active memory. In one SQLite transaction it:
+
+1. creates a replacement in the same global/project scope;
+2. attaches new provenance to the replacement;
+3. marks the previous record `superseded`;
+4. records a `superseded_by` relation from old → new.
+
+The replacement inherits the old memory kind unless `--kind` is supplied. It cannot silently move a memory between global and project scope.
+
+`mem get` returns both incoming and outgoing semantic relations, so either side of a correction remains explainable.
+
+## Episodic history
+
+Schema v2 adds source-backed episodes and searchable episode entries. An episode represents one original session or event stream; `mem` does not copy that source into a new canonical transcript format.
+
+`mem episode create` is idempotent for `(source_type, source_ref)`. Reusing the same source reference for a different project/workspace is rejected rather than silently rebinding history.
+
+Each `mem episode record` entry stores:
+
+- an exact source-local `source_ref`;
+- source order (`ordinal`);
+- entry kind and optional role;
+- searchable text;
+- optional occurrence timestamp and opaque JSON metadata.
+
+Recording the same `(episode, source_ref)` again refreshes that indexed entry rather than creating a duplicate. `mem history` searches entry text with FTS5 `AND` and returns both the episode-level source reference and the exact entry-level source reference, so an adapter can progressively disclose the original evidence.
+
+Opening an existing schema-v1 database migrates it to schema v2 in place. The migration and exact-source-backreference behavior are covered by tests.
 
 ## Data location
 
@@ -131,15 +183,15 @@ Current memory kinds:
 
 A memory is either global or project-scoped. Inside a Git repository, `remember` and `search` use the detected project by default; project retrieval also includes global memories. `--global` selects global-only behavior.
 
+Memory status is one of `active`, `superseded`, or `deleted`. `mem status` reports each category explicitly.
+
 ## Next
 
 The next qualified slices are expected to be:
 
-1. correction/supersession semantics and richer relation-aware reads;
-2. episodic source/index primitives with exact session backreferences;
-3. durable background indexing jobs and local embeddings;
-4. hybrid FTS/vector retrieval;
-5. a thin Pi extension, with a warm `mem serve --stdio` mode only if it materially helps latency.
+1. durable background indexing jobs and local embeddings;
+2. hybrid FTS/vector retrieval;
+3. a thin Pi extension, with a warm `mem serve --stdio` mode only if it materially helps latency.
 
 ANN indexes, automatic LLM memory promotion, sync protocols, and custom database backends remain deferred until measured requirements justify them.
 
