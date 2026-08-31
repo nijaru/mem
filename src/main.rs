@@ -6,6 +6,7 @@ mod store;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
@@ -46,6 +47,7 @@ enum Command {
     Forget(Forget),
     Episode(EpisodeCommand),
     History(History),
+    Index(IndexCommand),
 }
 
 /// Initialize the local memory database.
@@ -357,6 +359,73 @@ struct History {
     /// Maximum number of matching source entries.
     #[usage(short = 'n', long)]
     limit: Option<usize>,
+}
+
+/// Operate the durable derived-index work queue.
+#[derive(Args)]
+struct IndexCommand {
+    #[usage(subcommand)]
+    command: IndexSubcommand,
+}
+
+#[derive(Subcommands)]
+enum IndexSubcommand {
+    Status(IndexStatus),
+    Claim(IndexClaim),
+    Complete(IndexComplete),
+    Retry(IndexRetry),
+}
+
+/// Show derived-index queue counts.
+#[derive(Args)]
+struct IndexStatus;
+
+/// Claim pending or expired derived-index work.
+#[derive(Args)]
+struct IndexClaim {
+    /// Stable worker identifier.
+    worker: String,
+
+    /// Maximum number of jobs to claim.
+    #[usage(short = 'n', long)]
+    limit: Option<usize>,
+
+    /// Lease duration in seconds.
+    #[usage(long)]
+    lease_seconds: Option<u64>,
+}
+
+/// Complete one claimed derived-index job.
+#[derive(Args)]
+struct IndexComplete {
+    /// Job identifier.
+    job: String,
+
+    /// Generation claimed by the worker.
+    generation: i64,
+
+    /// Opaque lease token returned by `index claim`.
+    lease_token: String,
+}
+
+/// Release one claimed job for retry after a delay.
+#[derive(Args)]
+struct IndexRetry {
+    /// Job identifier.
+    job: String,
+
+    /// Generation claimed by the worker.
+    generation: i64,
+
+    /// Opaque lease token returned by `index claim`.
+    lease_token: String,
+
+    /// Diagnostic retained with the pending job.
+    error: String,
+
+    /// Delay before the job can be claimed again, in seconds.
+    #[usage(long)]
+    delay_seconds: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -755,6 +824,78 @@ fn run(cli: MemCli) -> Result<()> {
                 }
             }
         }
+        Command::Index(command) => match command.command {
+            IndexSubcommand::Status(_) => {
+                let stats = store.index_job_stats()?;
+                if cli.json {
+                    print_json(&stats)?;
+                } else {
+                    println!("pending: {}", stats.pending);
+                    println!("running: {}", stats.running);
+                }
+            }
+            IndexSubcommand::Claim(command) => {
+                let jobs = store.claim_index_jobs(
+                    &command.worker,
+                    command.limit.unwrap_or(32).clamp(1, 1000),
+                    Duration::from_secs(command.lease_seconds.unwrap_or(60).clamp(1, 86_400)),
+                )?;
+                if cli.json {
+                    print_json(&jobs)?;
+                } else {
+                    for job in jobs {
+                        println!(
+                            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                            job.id,
+                            job.entity_type,
+                            job.entity_id,
+                            job.index_kind,
+                            job.generation,
+                            job.lease_token,
+                            job.lease_until
+                        );
+                    }
+                }
+            }
+            IndexSubcommand::Complete(command) => {
+                let completed = store.complete_index_job(
+                    &command.job,
+                    command.generation,
+                    &command.lease_token,
+                )?;
+                if cli.json {
+                    print_json(&serde_json::json!({
+                        "job": command.job,
+                        "generation": command.generation,
+                        "completed": completed
+                    }))?;
+                } else if completed {
+                    println!("completed {} generation {}", command.job, command.generation);
+                } else {
+                    println!("stale or unowned job {} generation {}", command.job, command.generation);
+                }
+            }
+            IndexSubcommand::Retry(command) => {
+                let retried = store.retry_index_job(
+                    &command.job,
+                    command.generation,
+                    &command.lease_token,
+                    &command.error,
+                    Duration::from_secs(command.delay_seconds.unwrap_or(30).min(86_400)),
+                )?;
+                if cli.json {
+                    print_json(&serde_json::json!({
+                        "job": command.job,
+                        "generation": command.generation,
+                        "retried": retried
+                    }))?;
+                } else if retried {
+                    println!("retried {} generation {}", command.job, command.generation);
+                } else {
+                    println!("stale or unowned job {} generation {}", command.job, command.generation);
+                }
+            }
+        },
     }
 
     Ok(())
