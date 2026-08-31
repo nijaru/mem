@@ -1,4 +1,5 @@
 mod embedding;
+mod embedding_worker;
 mod episode;
 mod index_job;
 mod project;
@@ -13,6 +14,7 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use usage::{Args, Cli, Subcommands};
 
+use crate::embedding_worker::{EmbeddingRunOptions, default_embedding_threads, model_cache_dir};
 use crate::episode::{NewEpisode, NewEpisodeEntry};
 use crate::project::ProjectContext;
 use crate::store::{
@@ -372,6 +374,7 @@ struct IndexCommand {
 #[derive(Subcommands)]
 enum IndexSubcommand {
     Status(IndexStatus),
+    Run(IndexRun),
     Claim(IndexClaim),
     Commit(IndexCommit),
     Complete(IndexComplete),
@@ -381,6 +384,26 @@ enum IndexSubcommand {
 /// Show derived-index queue counts.
 #[derive(Args)]
 struct IndexStatus;
+
+/// Process a bounded batch of pending embeddings with the built-in local model.
+#[derive(Args)]
+struct IndexRun {
+    /// Maximum number of jobs to process in this invocation.
+    #[usage(short = 'n', long)]
+    limit: Option<usize>,
+
+    /// Maximum ONNX Runtime intra-op CPU threads.
+    #[usage(long)]
+    threads: Option<usize>,
+
+    /// Lease duration in seconds while model loading and inference run.
+    #[usage(long)]
+    lease_seconds: Option<u64>,
+
+    /// Delay before retrying model/inference failures, in seconds.
+    #[usage(long)]
+    retry_seconds: Option<u64>,
+}
 
 /// Claim pending or expired derived-index work.
 #[derive(Args)]
@@ -853,6 +876,34 @@ fn run(cli: MemCli) -> Result<()> {
                 } else {
                     println!("pending: {}", stats.pending);
                     println!("running: {}", stats.running);
+                }
+            }
+            IndexSubcommand::Run(command) => {
+                let stats = store.run_embedding_jobs(EmbeddingRunOptions {
+                    limit: command.limit.unwrap_or(64).min(1000),
+                    threads: command
+                        .threads
+                        .unwrap_or_else(default_embedding_threads)
+                        .min(256),
+                    lease_duration: Duration::from_secs(
+                        command.lease_seconds.unwrap_or(1800).min(86_400),
+                    ),
+                    retry_delay: Duration::from_secs(
+                        command.retry_seconds.unwrap_or(60).min(86_400),
+                    ),
+                    cache_dir: model_cache_dir()?,
+                    show_download_progress: !cli.json,
+                })?;
+                if cli.json {
+                    print_json(&stats)?;
+                } else {
+                    println!("model: {}", stats.model);
+                    println!("cache: {}", stats.cache_dir);
+                    println!("claimed: {}", stats.claimed);
+                    println!("eligible: {}", stats.eligible);
+                    println!("committed: {}", stats.committed);
+                    println!("stale: {}", stats.stale);
+                    println!("retried: {}", stats.retried);
                 }
             }
             IndexSubcommand::Claim(command) => {
