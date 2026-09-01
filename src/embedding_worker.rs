@@ -14,6 +14,7 @@ use crate::store::Store;
 pub const EMBEDDING_MODEL_ID: &str =
     "fastembed-5.3.0:Qdrant/bge-small-en-v1.5-onnx-Q/model_optimized.onnx";
 
+#[derive(Clone)]
 pub struct EmbeddingRunOptions {
     pub limit: usize,
     pub lease_duration: Duration,

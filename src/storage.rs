@@ -7,9 +7,12 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use rusqlite::{Connection, OpenFlags};
 use serde::Serialize;
 
+use crate::embedding_worker::{EMBEDDING_MODEL_ID, EmbeddingRunOptions};
 use crate::episode::HistoryHit;
+use crate::index_job::IndexJobStats;
 use crate::store::{SearchHit, Store, WorkspaceState};
 use crate::vector_search::SemanticSearchHit;
 
@@ -284,6 +287,14 @@ impl StorageRouter {
 
     pub fn managed_at(home: PathBuf) -> Self {
         Self::Managed(ManagedLayout::at(home))
+    }
+
+    /// The managed layout this router uses. Exact-file routers have none.
+    pub fn managed_layout(&self) -> &ManagedLayout {
+        match self {
+            Self::Managed(layout) => layout,
+            Self::Exact(_) => panic!("managed_layout on an exact-file router"),
+        }
     }
 
     /// The single store a canonical write must go to, created on demand.
@@ -678,6 +689,273 @@ fn cached_query_vector(query: &str) -> Result<Option<Vec<f32>>> {
     Ok(crate::embedding_worker::embed_query_if_cached(query, &cache_dir).unwrap_or(None))
 }
 
+/// Aggregate of `EmbeddingRunStats` across the stores one routed index run
+/// covered, so `index run` reports one object regardless of store count.
+#[derive(Debug, Serialize)]
+pub struct RoutedRunStats {
+    pub model: &'static str,
+    pub cache_dir: String,
+    pub stores: usize,
+    pub claimed: usize,
+    pub eligible: usize,
+    pub committed: usize,
+    pub stale: usize,
+    pub retried: usize,
+}
+
+impl StorageRouter {
+    /// Aggregate `index run` across the selected stores. Runs proceed store
+    /// by store; a failure on one store aborts the run (leases already
+    /// claimed elsewhere keep running until expiry, which matches how an
+    /// interrupted single-store run behaves today).
+    fn run_index_across(
+        &self,
+        stores: Vec<PathBuf>,
+        options: EmbeddingRunOptions,
+    ) -> Result<RoutedRunStats> {
+        let mut stats = RoutedRunStats {
+            model: EMBEDDING_MODEL_ID,
+            cache_dir: options.cache_dir.display().to_string(),
+            stores: stores.len(),
+            claimed: 0,
+            eligible: 0,
+            committed: 0,
+            stale: 0,
+            retried: 0,
+        };
+        if stores.is_empty() {
+            return Ok(stats);
+        }
+        for path in &stores {
+            if !path.is_file() {
+                continue;
+            }
+            let Some(mut store) = Store::open_existing(path)? else {
+                continue;
+            };
+            let run = store.run_embedding_jobs(options.clone())?;
+            stats.claimed += run.claimed;
+            stats.eligible += run.eligible;
+            stats.committed += run.committed;
+            stats.stale += run.stale;
+            stats.retried += run.retried;
+        }
+        Ok(stats)
+    }
+
+    /// The databases a managed `index run` covers by default: the current
+    /// project's database and the user database. Normal runs must not scan
+    /// every project; `--all` exists for that maintenance mode.
+    fn managed_index_store_paths(&self, project_id: Option<&str>) -> Result<Vec<PathBuf>> {
+        match self {
+            Self::Exact(path) => Ok(vec![path.clone()]),
+            Self::Managed(layout) => {
+                let mut paths = Vec::new();
+                if let Some(project) = project_id {
+                    paths.push(layout.project_db(project)?.path);
+                }
+                paths.push(layout.user_db());
+                Ok(paths)
+            }
+        }
+    }
+
+    /// All managed databases for `index run --all`: user plus every existing
+    /// project database.
+    fn all_managed_store_paths(&self) -> Result<Vec<PathBuf>> {
+        match self {
+            Self::Exact(path) => Ok(vec![path.clone()]),
+            Self::Managed(layout) => {
+                let mut paths = vec![layout.user_db()];
+                paths.extend(
+                    layout
+                        .existing_project_dbs()?
+                        .into_iter()
+                        .map(|ProjectDb { path, .. }| path),
+                );
+                Ok(paths)
+            }
+        }
+    }
+}
+
+/// `index run` through the router. Managed default covers the current
+/// project database plus the user database; `all` additionally covers every
+/// existing managed project database. Stores that do not exist are skipped:
+/// indexing must never create a database.
+pub fn routed_run_index(
+    router: &StorageRouter,
+    project_id: Option<&str>,
+    all: bool,
+    options: EmbeddingRunOptions,
+) -> Result<RoutedRunStats> {
+    let paths = if all {
+        router.all_managed_store_paths()?
+    } else {
+        router.managed_index_store_paths(project_id)?
+    };
+    router.run_index_across(paths, options)
+}
+
+/// `index status` through the router: pending/running counts aggregated over
+/// the same stores a normal `index run` would cover.
+pub fn routed_index_stats(
+    router: &StorageRouter,
+    project_id: Option<&str>,
+) -> Result<IndexJobStats> {
+    let paths = router.managed_index_store_paths(project_id)?;
+    let mut stats = IndexJobStats {
+        pending: 0,
+        running: 0,
+    };
+    for path in paths {
+        if !path.is_file() {
+            continue;
+        }
+        let Some(store) = Store::open_existing(&path)? else {
+            continue;
+        };
+        let run = store.index_job_stats()?;
+        stats.pending += run.pending;
+        stats.running += run.running;
+    }
+    Ok(stats)
+}
+
+/// Read-only store inventory for `storage status`. Opening a store for the
+/// inventory must never create the file: absent DBs are reported as missing,
+/// not opened.
+#[derive(Debug, Serialize)]
+pub struct StoreInventory {
+    pub path: String,
+    pub exists: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema_version: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memories: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_memories: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub episodes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_jobs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub running_jobs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Managed-layout inventory for `storage status`. Pure read: no file is
+/// created or modified.
+#[derive(Debug, Serialize)]
+pub struct StorageStatusReport {
+    pub managed_root: String,
+    pub layout_version: &'static str,
+    pub layout_dir: String,
+    pub layout_exists: bool,
+    pub legacy_db: String,
+    pub legacy_db_exists: bool,
+    pub migration_needed: bool,
+    pub user_store: StoreInventory,
+    pub project_stores: Vec<ProjectStoreInventory>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProjectStoreInventory {
+    pub project_id: String,
+    pub path: String,
+    #[serde(flatten)]
+    pub inventory: StoreInventory,
+}
+
+fn inventory_store(path: &Path) -> StoreInventory {
+    let exists = path.is_file();
+    let mut inventory = StoreInventory {
+        path: path.display().to_string(),
+        exists,
+        schema_version: None,
+        memories: None,
+        active_memories: None,
+        episodes: None,
+        pending_jobs: None,
+        running_jobs: None,
+        error: None,
+    };
+    if !exists {
+        return inventory;
+    }
+    let report = |error: anyhow::Error, mut failed: StoreInventory| {
+        failed.error = Some(format!("{error:#}"));
+        failed
+    };
+    let Ok(connection) = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY) else {
+        return report(anyhow::anyhow!("open failed"), inventory);
+    };
+    let schema_version =
+        match connection.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)) {
+            Ok(version) => version,
+            Err(error) => return report(error.into(), inventory),
+        };
+    let counts = || -> rusqlite::Result<(i64, i64, i64, i64, i64)> {
+        Ok((
+            connection.query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))?,
+            connection.query_row(
+                "SELECT COUNT(*) FROM memories WHERE status = 'active'",
+                [],
+                |row| row.get(0),
+            )?,
+            connection.query_row("SELECT COUNT(*) FROM episodes", [], |row| row.get(0))?,
+            connection.query_row(
+                "SELECT COUNT(*) FROM index_jobs WHERE state = 'pending'",
+                [],
+                |row| row.get(0),
+            )?,
+            connection.query_row(
+                "SELECT COUNT(*) FROM index_jobs WHERE state = 'running'",
+                [],
+                |row| row.get(0),
+            )?,
+        ))
+    };
+    let Ok((memories, active_memories, episodes, pending_jobs, running_jobs)) = counts() else {
+        return report(anyhow::anyhow!("inventory query failed"), inventory);
+    };
+    inventory.schema_version = Some(schema_version);
+    inventory.memories = Some(memories.unsigned_abs());
+    inventory.active_memories = Some(active_memories.unsigned_abs());
+    inventory.episodes = Some(episodes.unsigned_abs());
+    inventory.pending_jobs = Some(pending_jobs.unsigned_abs());
+    inventory.running_jobs = Some(running_jobs.unsigned_abs());
+    inventory
+}
+
+pub fn storage_status_report(layout: &ManagedLayout) -> Result<StorageStatusReport> {
+    let user_db = layout.user_db();
+    let layout_dir = layout.layout_dir();
+    let legacy_db = layout.legacy_db();
+    let project_dbs = layout.existing_project_dbs()?;
+    let project_stores = project_dbs
+        .into_iter()
+        .map(|ProjectDb { path, project_id }| ProjectStoreInventory {
+            project_id,
+            path: path.display().to_string(),
+            inventory: inventory_store(&path),
+        })
+        .collect();
+    let user_store = inventory_store(&user_db);
+    Ok(StorageStatusReport {
+        managed_root: layout.root().display().to_string(),
+        layout_version: LAYOUT_VERSION_DIR,
+        layout_dir: layout_dir.display().to_string(),
+        layout_exists: layout_dir.is_dir(),
+        legacy_db: legacy_db.display().to_string(),
+        legacy_db_exists: legacy_db.is_file(),
+        migration_needed: legacy_db.is_file() && !layout_dir.is_dir(),
+        user_store,
+        project_stores,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ManagedLayout, decode_component, encode_component};
@@ -809,6 +1087,7 @@ mod tests {
 #[cfg(test)]
 mod routing_tests {
     use super::StorageRouter;
+    use crate::embedding_worker::EmbeddingRunOptions;
     use crate::store::NewMemory;
 
     fn test_home() -> std::path::PathBuf {
@@ -1033,6 +1312,179 @@ mod routing_tests {
         let (_store, id) = super::routed_resolve_episode(&router, None, "eeee-0000-aaaa-cccc")
             .expect("resolve exact episode id");
         assert_eq!(id, "eeee-0000-aaaa-cccc");
+
+        std::fs::remove_dir_all(&home).expect("cleanup");
+    }
+
+    #[test]
+    fn managed_index_run_selects_current_project_and_user_stores() {
+        let home = test_home();
+        let router = StorageRouter::managed_at(home.clone());
+
+        // Current project + user stores have pending embedding jobs; another
+        // project's store has one too but must NOT be touched by a scoped run.
+        let mut project = router
+            .write_store(Some("github.com/x/current"))
+            .expect("open project store");
+        remember(
+            &mut project,
+            "current project memory",
+            Some("github.com/x/current"),
+        );
+        let mut user = router.write_store(None).expect("open user store");
+        remember(&mut user, "user memory", None);
+        let mut other = router
+            .write_store(Some("github.com/x/other"))
+            .expect("open other project store");
+        remember(
+            &mut other,
+            "other project memory",
+            Some("github.com/x/other"),
+        );
+        drop(project);
+        drop(user);
+        drop(other);
+
+        // Run with cached_only against an empty cache dir: zero claims, and
+        // pending counts prove the scoped stores (not the other project)
+        // would be covered by a full run.
+        let options = EmbeddingRunOptions {
+            limit: 16,
+            lease_duration: std::time::Duration::from_secs(60),
+            retry_delay: std::time::Duration::from_secs(60),
+            cache_dir: home.join("empty-model-cache"),
+            show_download_progress: false,
+            cached_only: true,
+        };
+        let stats = super::routed_run_index(&router, Some("github.com/x/current"), false, options)
+            .expect("routed index run");
+        assert_eq!(stats.stores, 2, "project + user only");
+        assert_eq!(stats.claimed, 0);
+        assert_eq!(stats.committed, 0);
+
+        // index status aggregates over the same scoped stores.
+        let stats = super::routed_index_stats(&router, Some("github.com/x/current"))
+            .expect("routed index stats");
+        assert_eq!(stats.pending, 2, "one job in each scoped store");
+        assert_eq!(stats.running, 0);
+
+        std::fs::remove_dir_all(&home).expect("cleanup");
+    }
+
+    #[test]
+    fn index_run_all_covers_every_managed_store() {
+        let home = test_home();
+        let router = StorageRouter::managed_at(home.clone());
+
+        for project in ["github.com/x/a", "github.com/x/b"] {
+            let mut store = router
+                .write_store(Some(project))
+                .expect("open project store");
+            remember(&mut store, "memory", Some(project));
+        }
+        let mut user = router.write_store(None).expect("open user store");
+        remember(&mut user, "user memory", None);
+        drop(user);
+
+        let options = EmbeddingRunOptions {
+            limit: 16,
+            lease_duration: std::time::Duration::from_secs(60),
+            retry_delay: std::time::Duration::from_secs(60),
+            cache_dir: home.join("empty-model-cache"),
+            show_download_progress: false,
+            cached_only: true,
+        };
+        let stats =
+            super::routed_run_index(&router, None, true, options).expect("routed all index run");
+        assert_eq!(stats.stores, 3, "user + two projects");
+        assert_eq!(stats.claimed, 0);
+
+        let stats =
+            super::routed_index_stats(&router, Some("github.com/x/a")).expect("routed index stats");
+        // Scoped stats cover the current project + user stores.
+        assert_eq!(stats.pending, 2);
+
+        std::fs::remove_dir_all(&home).expect("cleanup");
+    }
+
+    #[test]
+    fn managed_index_run_never_creates_missing_stores() {
+        let home = test_home();
+        let router = StorageRouter::managed_at(home.clone());
+
+        // Only the user store exists. A scoped run referencing a project
+        // whose DB was never created must not create it.
+        let options = EmbeddingRunOptions {
+            limit: 16,
+            lease_duration: std::time::Duration::from_secs(60),
+            retry_delay: std::time::Duration::from_secs(60),
+            cache_dir: home.join("empty-model-cache"),
+            show_download_progress: false,
+            cached_only: true,
+        };
+        let stats =
+            super::routed_run_index(&router, Some("github.com/x/never-created"), false, options)
+                .expect("routed index run");
+        assert_eq!(stats.stores, 2, "scoped run still counts both paths");
+        assert!(
+            !router
+                .managed_layout()
+                .project_db("github.com/x/never-created")
+                .expect("resolve project db")
+                .path
+                .is_file(),
+            "indexing must not create a project database"
+        );
+
+        std::fs::remove_dir_all(&home).expect("cleanup");
+    }
+
+    #[test]
+    fn storage_status_reports_without_creating_files() {
+        let home = test_home();
+        let router = StorageRouter::managed_at(home.clone());
+
+        let mut project = router
+            .write_store(Some("github.com/x/inv"))
+            .expect("open project store");
+        remember(&mut project, "memory", Some("github.com/x/inv"));
+        let mut user = router.write_store(None).expect("open user store");
+        remember(&mut user, "user memory", None);
+        drop(project);
+        drop(user);
+
+        let layout = router.managed_layout();
+        let report = super::storage_status_report(layout).expect("status report");
+        assert!(report.layout_exists);
+        assert_eq!(report.layout_version, "layout-v1");
+        assert!(!report.legacy_db_exists);
+        assert!(!report.migration_needed);
+        assert!(report.user_store.exists);
+        assert_eq!(report.user_store.schema_version, Some(5));
+        assert_eq!(report.project_stores.len(), 1);
+        assert_eq!(report.project_stores[0].project_id, "github.com/x/inv");
+        assert_eq!(report.project_stores[0].inventory.active_memories, Some(1));
+        assert_eq!(report.project_stores[0].inventory.pending_jobs, Some(1));
+
+        std::fs::remove_dir_all(&home).expect("cleanup");
+    }
+
+    #[test]
+    fn storage_status_flags_legacy_migration_needed() {
+        let home = test_home();
+        let layout = crate::storage::ManagedLayout::at(home.clone());
+        // Legacy DB present, layout absent → migration_needed.
+        let legacy = layout.legacy_db();
+        std::fs::write(&legacy, b"not a real db, presence only").expect("write legacy marker");
+
+        let report = super::storage_status_report(&layout).expect("status report");
+        assert!(report.legacy_db_exists);
+        assert!(!report.layout_exists);
+        assert!(report.migration_needed);
+        assert!(!report.user_store.exists);
+        assert!(report.project_stores.is_empty());
+        // Inventory must not fail on the non-database legacy file.
+        assert!(report.user_store.error.is_none());
 
         std::fs::remove_dir_all(&home).expect("cleanup");
     }

@@ -21,7 +21,18 @@ use crate::embedding_worker::{
 };
 use crate::episode::{NewEpisode, NewEpisodeEntry};
 use crate::project::ProjectContext;
-use crate::storage::StorageRouter;
+use crate::storage::{ManagedLayout, StorageRouter};
+
+/// The low-level worker protocol operates on one exact database. In managed
+/// operation the caller must pin the database with `--db`/`MEM_DB`.
+fn require_exact_store(router: &StorageRouter) -> Result<Store> {
+    match router {
+        StorageRouter::Exact(path) => Store::open(path),
+        StorageRouter::Managed(_) => bail!(
+            "index claim/commit/complete/retry require an exact database; pass --db or set MEM_DB"
+        ),
+    }
+}
 use crate::store::{
     Memory, MemorySource, NewCorrection, NewMemory, NewWorkspaceState, SearchHit, Store,
     WorkspaceState,
@@ -57,6 +68,7 @@ enum Command {
     Episode(EpisodeCommand),
     History(History),
     Index(IndexCommand),
+    Storage(StorageCommand),
 }
 
 /// Initialize the local memory database.
@@ -385,6 +397,49 @@ struct IndexCommand {
     command: IndexSubcommand,
 }
 
+/// Manage the managed storage layout.
+#[derive(Args)]
+struct StorageCommand {
+    #[usage(subcommand)]
+    command: StorageSubcommand,
+}
+
+#[derive(Subcommands)]
+enum StorageSubcommand {
+    /// Show the managed-layout inventory without creating files.
+    Status(StorageStatus),
+    /// Migrate a legacy single-file store into the managed layout. (Not yet
+    /// implemented; planned for a following slice.)
+    Migrate(StorageMigrate),
+    /// Delete one project's managed database and sidecars. (Not yet
+    /// implemented; planned for a following slice.)
+    Purge(StoragePurge),
+}
+
+/// Show the managed-layout inventory.
+#[derive(Args)]
+struct StorageStatus;
+
+/// Migrate legacy storage into the managed layout.
+#[derive(Args)]
+struct StorageMigrate {
+    /// Legacy database file to migrate from.
+    #[usage(long)]
+    from: Option<String>,
+}
+
+/// Purge one project from the managed layout.
+#[derive(Args)]
+struct StoragePurge {
+    /// Project identifier whose managed database should be deleted.
+    #[usage(long)]
+    project: String,
+
+    /// Do not ask for confirmation.
+    #[usage(long)]
+    yes: bool,
+}
+
 #[derive(Subcommands)]
 enum IndexSubcommand {
     Status(IndexStatus),
@@ -419,6 +474,11 @@ struct IndexRun {
     /// downloading the model.
     #[usage(long)]
     cached_only: bool,
+
+    /// Maintenance mode: process every existing managed project database,
+    /// not just the current scope. Managed layout only.
+    #[usage(long)]
+    all: bool,
 }
 
 /// Claim pending or expired derived-index work.
@@ -943,20 +1003,26 @@ fn run(cli: MemCli) -> Result<()> {
                 }
             }
         }
-        Command::Index(command) => {
-            let mut store = router.write_store(None)?;
-            match command.command {
-                IndexSubcommand::Status(_) => {
-                    let stats = store.index_job_stats()?;
-                    if cli.json {
-                        print_json(&stats)?;
-                    } else {
-                        println!("pending: {}", stats.pending);
-                        println!("running: {}", stats.running);
-                    }
+        Command::Index(command) => match command.command {
+            IndexSubcommand::Status(_) => {
+                let context = optional_project_context(None, None)?;
+                let project_id = context.as_ref().map(|c| c.project_id.as_str());
+                let stats = crate::storage::routed_index_stats(&router, project_id)?;
+                if cli.json {
+                    print_json(&stats)?;
+                } else {
+                    println!("pending: {}", stats.pending);
+                    println!("running: {}", stats.running);
                 }
-                IndexSubcommand::Run(command) => {
-                    let stats = store.run_embedding_jobs(EmbeddingRunOptions {
+            }
+            IndexSubcommand::Run(command) => {
+                let context = optional_project_context(None, None)?;
+                let project_id = context.as_ref().map(|c| c.project_id.as_str());
+                let stats = crate::storage::routed_run_index(
+                    &router,
+                    project_id,
+                    command.all,
+                    EmbeddingRunOptions {
                         limit: command.limit.unwrap_or(64).min(1000),
                         lease_duration: Duration::from_secs(
                             command.lease_seconds.unwrap_or(1800).min(86_400),
@@ -967,120 +1033,172 @@ fn run(cli: MemCli) -> Result<()> {
                         cache_dir: model_cache_dir()?,
                         show_download_progress: !cli.json,
                         cached_only: command.cached_only,
-                    })?;
-                    if cli.json {
-                        print_json(&stats)?;
-                    } else {
-                        println!("model: {}", stats.model);
-                        println!("cache: {}", stats.cache_dir);
-                        println!("claimed: {}", stats.claimed);
-                        println!("eligible: {}", stats.eligible);
-                        println!("committed: {}", stats.committed);
-                        println!("stale: {}", stats.stale);
-                        println!("retried: {}", stats.retried);
-                    }
+                    },
+                )?;
+                if cli.json {
+                    print_json(&stats)?;
+                } else {
+                    println!("model: {}", stats.model);
+                    println!("cache: {}", stats.cache_dir);
+                    println!("stores: {}", stats.stores);
+                    println!("claimed: {}", stats.claimed);
+                    println!("eligible: {}", stats.eligible);
+                    println!("committed: {}", stats.committed);
+                    println!("stale: {}", stats.stale);
+                    println!("retried: {}", stats.retried);
                 }
-                IndexSubcommand::Claim(command) => {
-                    let jobs = store.claim_index_jobs(
-                        &command.worker,
-                        command.limit.unwrap_or(32).clamp(1, 1000),
-                        Duration::from_secs(command.lease_seconds.unwrap_or(60).clamp(1, 86_400)),
-                    )?;
-                    if cli.json {
-                        print_json(&jobs)?;
-                    } else {
-                        for job in jobs {
-                            println!(
-                                "{}\t{}\t{}\t{}\t{}\t{}\t{}",
-                                job.id,
-                                job.entity_type,
-                                job.entity_id,
-                                job.index_kind,
-                                job.generation,
-                                job.lease_token,
-                                job.lease_until
-                            );
-                        }
-                    }
-                }
-                IndexSubcommand::Commit(command) => {
-                    let vector: Vec<f32> = serde_json::from_str(&command.vector)
-                        .context("embedding vector must be a JSON array of numbers")?;
-                    let committed = store.commit_embedding(
-                        &command.job,
-                        command.generation,
-                        &command.lease_token,
-                        &command.model,
-                        &vector,
-                    )?;
-                    if cli.json {
-                        print_json(&serde_json::json!({
-                            "job": command.job,
-                            "generation": command.generation,
-                            "model": command.model,
-                            "committed": committed
-                        }))?;
-                    } else if committed {
+            }
+            IndexSubcommand::Claim(command) => {
+                // Low-level worker protocol operations must be pinned to one
+                // exact database: a worker holds a lease in one file, and
+                // managed operation must not guess which store owns a job.
+                let mut store = require_exact_store(&router)?;
+                let jobs = store.claim_index_jobs(
+                    &command.worker,
+                    command.limit.unwrap_or(32).clamp(1, 1000),
+                    Duration::from_secs(command.lease_seconds.unwrap_or(60).clamp(1, 86_400)),
+                )?;
+                if cli.json {
+                    print_json(&jobs)?;
+                } else {
+                    for job in jobs {
                         println!(
-                            "committed embedding {} generation {} model {}",
-                            command.job, command.generation, command.model
-                        );
-                    } else {
-                        println!(
-                            "stale or unowned job {} generation {}",
-                            command.job, command.generation
-                        );
-                    }
-                }
-                IndexSubcommand::Complete(command) => {
-                    let completed = store.complete_index_job(
-                        &command.job,
-                        command.generation,
-                        &command.lease_token,
-                    )?;
-                    if cli.json {
-                        print_json(&serde_json::json!({
-                            "job": command.job,
-                            "generation": command.generation,
-                            "completed": completed
-                        }))?;
-                    } else if completed {
-                        println!(
-                            "completed {} generation {}",
-                            command.job, command.generation
-                        );
-                    } else {
-                        println!(
-                            "stale or unowned job {} generation {}",
-                            command.job, command.generation
-                        );
-                    }
-                }
-                IndexSubcommand::Retry(command) => {
-                    let retried = store.retry_index_job(
-                        &command.job,
-                        command.generation,
-                        &command.lease_token,
-                        &command.error,
-                        Duration::from_secs(command.delay_seconds.unwrap_or(30).min(86_400)),
-                    )?;
-                    if cli.json {
-                        print_json(&serde_json::json!({
-                            "job": command.job,
-                            "generation": command.generation,
-                            "retried": retried
-                        }))?;
-                    } else if retried {
-                        println!("retried {} generation {}", command.job, command.generation);
-                    } else {
-                        println!(
-                            "stale or unowned job {} generation {}",
-                            command.job, command.generation
+                            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                            job.id,
+                            job.entity_type,
+                            job.entity_id,
+                            job.index_kind,
+                            job.generation,
+                            job.lease_token,
+                            job.lease_until
                         );
                     }
                 }
             }
-        }
+            IndexSubcommand::Commit(command) => {
+                let mut store = require_exact_store(&router)?;
+                let vector: Vec<f32> = serde_json::from_str(&command.vector)
+                    .context("embedding vector must be a JSON array of numbers")?;
+                let committed = store.commit_embedding(
+                    &command.job,
+                    command.generation,
+                    &command.lease_token,
+                    &command.model,
+                    &vector,
+                )?;
+                if cli.json {
+                    print_json(&serde_json::json!({
+                        "job": command.job,
+                        "generation": command.generation,
+                        "model": command.model,
+                        "committed": committed
+                    }))?;
+                } else if committed {
+                    println!(
+                        "committed embedding {} generation {} model {}",
+                        command.job, command.generation, command.model
+                    );
+                } else {
+                    println!(
+                        "stale or unowned job {} generation {}",
+                        command.job, command.generation
+                    );
+                }
+            }
+            IndexSubcommand::Complete(command) => {
+                let store = require_exact_store(&router)?;
+                let completed = store.complete_index_job(
+                    &command.job,
+                    command.generation,
+                    &command.lease_token,
+                )?;
+                if cli.json {
+                    print_json(&serde_json::json!({
+                        "job": command.job,
+                        "generation": command.generation,
+                        "completed": completed
+                    }))?;
+                } else if completed {
+                    println!(
+                        "completed {} generation {}",
+                        command.job, command.generation
+                    );
+                } else {
+                    println!(
+                        "stale or unowned job {} generation {}",
+                        command.job, command.generation
+                    );
+                }
+            }
+            IndexSubcommand::Retry(command) => {
+                let store = require_exact_store(&router)?;
+                let retried = store.retry_index_job(
+                    &command.job,
+                    command.generation,
+                    &command.lease_token,
+                    &command.error,
+                    Duration::from_secs(command.delay_seconds.unwrap_or(30).min(86_400)),
+                )?;
+                if cli.json {
+                    print_json(&serde_json::json!({
+                        "job": command.job,
+                        "generation": command.generation,
+                        "retried": retried
+                    }))?;
+                } else if retried {
+                    println!("retried {} generation {}", command.job, command.generation);
+                } else {
+                    println!(
+                        "stale or unowned job {} generation {}",
+                        command.job, command.generation
+                    );
+                }
+            }
+        },
+        Command::Storage(command) => match command.command {
+            StorageSubcommand::Status(_) => {
+                let layout = ManagedLayout::resolve()?;
+                let report = crate::storage::storage_status_report(&layout)?;
+                if cli.json {
+                    print_json(&report)?;
+                } else {
+                    println!("managed root: {}", report.managed_root);
+                    println!("layout: {} ({})", report.layout_version, {
+                        if report.layout_exists {
+                            "active"
+                        } else {
+                            "not created"
+                        }
+                    });
+                    println!("user store: {}", report.user_store.path);
+                    println!(
+                        "legacy store: {} ({})",
+                        report.legacy_db,
+                        if report.legacy_db_exists {
+                            "present"
+                        } else {
+                            "absent"
+                        }
+                    );
+                    if report.migration_needed {
+                        println!("migration needed: run `mem storage migrate`");
+                    }
+                    for store in &report.project_stores {
+                        println!("project {}: {}", store.project_id, store.path);
+                    }
+                }
+            }
+            StorageSubcommand::Migrate(_) => {
+                bail!(
+                    "storage migrate is not implemented yet; a following release adds staged whole-layout migration"
+                )
+            }
+            StorageSubcommand::Purge(_) => {
+                bail!(
+                    "storage purge is not implemented yet; a following release adds managed project purge"
+                )
+            }
+        },
     }
 
     Ok(())

@@ -179,7 +179,7 @@ Semantic search uses SQLite FTS5 immediately; no external service or model is re
 - `mem context` ranks semantically when the local embedding model is already cached and every active memory visible in the query scope has a current-model vector, and falls back to broader lexical `OR` recall otherwise. `--lexical` forces the lexical baseline.
 - superseded and deleted memories remain in canonical storage but are excluded from active retrieval.
 
-Vector retrieval is derived from the canonical SQLite data and is not required for correctness. Incomplete embedding coverage (for example, a just-remembered memory whose indexing job is still queued) makes `mem context` use lexical recall so no active memory can disappear. `mem context` never downloads the embedding model; run `mem index run` (or an explicit `mem search --semantic`) once to populate the local model cache and vectors. Embedding jobs whose canonical source lost its production-model vector (for example after a model change) are rediscovered by `mem index run`. `mem index run --cached-only` does nothing when the model is not already cached, so adapters can schedule indexing without risking a download.
+Vector retrieval is derived from the canonical SQLite data and is not required for correctness. Incomplete embedding coverage (for example, a just-remembered memory whose indexing job is still queued) makes `mem context` use lexical recall so no active memory can disappear. `mem context` never downloads the embedding model; run `mem index run` (or an explicit `mem search --semantic`) once to populate the local model cache and vectors. Embedding jobs whose canonical source lost its production-model vector (for example after a model change) are rediscovered by `mem index run`. `mem index run --cached-only` does nothing when the model is not already cached, so adapters can schedule indexing without risking a download. In the managed layout, `mem index run` covers the current project database plus the user database; `mem index run --all` also covers every other existing managed project database.
 
 ## Data location
 
@@ -190,6 +190,10 @@ Overrides:
 - `MEM_DB=/path/to/memory.db` selects an exact database path.
 - `MEM_HOME=/path/to/dir` stores the database at `$MEM_HOME/memory.db`.
 - `--db /path/to/memory.db` overrides the database for one command.
+
+### Managed layout (in progress)
+
+A per-project/user managed layout (`layout-v1/` with `user.db` and `projects/<encoded>/mem.db`) is being rolled out in slices. `mem storage status` reports the managed-layout inventory (layout version and paths, legacy `memory.db` presence, per-store schema/counts/queue state, migration-needed state) without creating any files. Managed `index run` covers the current project database plus the user database; `index run --all` additionally covers every existing managed project database. The low-level worker protocol (`index claim|commit|complete|retry`) is pinned to one exact database. Storage migration from the legacy single file and managed project purge arrive in a following release; the default storage location does not change until the rollout completes.
 
 ## Memory model
 
