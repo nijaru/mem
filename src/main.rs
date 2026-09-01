@@ -623,10 +623,41 @@ fn parse_cli(argv: &[String]) -> Option<MemCli> {
 }
 
 fn run(cli: MemCli) -> Result<()> {
-    let db_path = database_path(cli.db.as_deref())?;
-    // Slice E flips the no-override default to the managed layout; until
-    // then every invocation is exact-file and routing is a pass-through.
-    let router = StorageRouter::exact(db_path.clone());
+    // Exact-file bypass: --db/MEM_DB pins every operation to one database.
+    // Otherwise the managed layout is the default. A legacy memory.db that
+    // still exists without an active layout is an explicit migration source:
+    // storage commands surface the migrate guidance instead of silently
+    // splitting usage between the legacy file and an empty new layout.
+    let router = match database_path(cli.db.as_deref()) {
+        Ok(path) => StorageRouter::exact(path),
+        Err(_) => {
+            let router = StorageRouter::managed()?;
+            if matches!(
+                cli.command,
+                Command::Storage(StorageCommand {
+                    command: StorageSubcommand::Status(_) | StorageSubcommand::Migrate(_)
+                }) | Command::Project(_)
+            ) {
+                // Inventory, migration, and project identity stay usable.
+                router
+            } else {
+                let layout = router.managed_layout();
+                if layout.legacy_db().is_file() && !layout.layout_dir().is_dir() {
+                    bail!(
+                        "legacy store {} exists but the managed layout is not active; \
+                         run `mem storage migrate` (or `mem storage status`) to move it into {}",
+                        layout.legacy_db().display(),
+                        layout.layout_dir().display()
+                    );
+                }
+                router
+            }
+        }
+    };
+    let db_path = match &router {
+        StorageRouter::Exact(path) => path.clone(),
+        StorageRouter::Managed(layout) => layout.user_db(),
+    };
 
     match cli.command {
         Command::Init(_) | Command::Status(_) => {
@@ -1432,20 +1463,18 @@ fn print_workspace_state(state: &WorkspaceState) {
     println!("updated_at: {}", state.updated_at);
 }
 
+/// Resolve the exact-file override for this invocation. Only `--db` and
+/// `MEM_DB` select exact-file operation; every other invocation uses the
+/// managed layout (whose root `MEM_HOME` selects). Err means "no exact
+/// override requested".
 fn database_path(override_path: Option<&Path>) -> Result<PathBuf> {
     if let Some(path) = override_path {
         return Ok(path.to_owned());
     }
-    if let Some(path) = std::env::var_os("MEM_DB") {
+    if let Some(path) = std::env::var_os("MEM_DB").filter(|path| !path.is_empty()) {
         return Ok(PathBuf::from(path));
     }
-    if let Some(home) = std::env::var_os("MEM_HOME") {
-        return Ok(PathBuf::from(home).join("memory.db"));
-    }
-
-    let data_dir =
-        dirs::data_local_dir().context("could not determine the local data directory")?;
-    Ok(data_dir.join("mem").join("memory.db"))
+    bail!("no exact database override requested")
 }
 
 fn print_json(value: &impl Serialize) -> Result<()> {

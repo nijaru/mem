@@ -183,17 +183,37 @@ Vector retrieval is derived from the canonical SQLite data and is not required f
 
 ## Data location
 
-By default, `mem` stores `memory.db` under the platform-local application data directory in a `mem` subdirectory.
+By default, `mem` uses a managed per-project/user layout under the platform-local application data directory in a `mem` subdirectory:
+
+```text
+<managed root>/
+  layout-v1/
+    user.db                      global memories, global episodes
+    projects/<encoded id>/mem.db one database per project
+```
 
 Overrides:
 
-- `MEM_DB=/path/to/memory.db` selects an exact database path.
-- `MEM_HOME=/path/to/dir` stores the database at `$MEM_HOME/memory.db`.
+- `MEM_DB=/path/to/memory.db` selects an exact single database path for every operation (the bypass used by tests and isolated profiles).
 - `--db /path/to/memory.db` overrides the database for one command.
+- `MEM_HOME=/path/to/dir` moves the managed root (layout, and any legacy `memory.db` pending migration) to that directory.
+
+Reads never create missing databases; writes create exactly the one database a row belongs in. Recall merges project and user stores under a complete-coverage semantic gate with a deterministic lexical fallback; `history` stays single-store by design.
+
+### Legacy single file
+
+Earlier versions stored everything in one `<managed root>/memory.db`. When that file exists without an active `layout-v1`, storage-touching commands refuse with guidance instead of silently splitting usage; run:
+
+```text
+mem storage status
+mem storage migrate
+```
+
+Migration builds and verifies the full layout in a hidden staging directory and activates it with one atomic directory rename; the legacy file is left untouched for rollback. Re-running against an active layout is a no-op. `mem storage purge --project <id>` deletes exactly that project's managed database and SQLite sidecars after confirmation (`--yes` to skip).
 
 ### Managed layout (in progress)
 
-A per-project/user managed layout (`layout-v1/` with `user.db` and `projects/<encoded>/mem.db`) is being rolled out in slices. `mem storage status` reports the managed-layout inventory (layout version and paths, legacy `memory.db` presence, per-store schema/counts/queue state, migration-needed state) without creating any files. Managed `index run` covers the current project database plus the user database; `index run --all` additionally covers every existing managed project database. The low-level worker protocol (`index claim|commit|complete|retry`) is pinned to one exact database. `mem storage migrate` builds the complete managed layout in a hidden staging directory from a consistent snapshot of the legacy `memory.db`, verifies it, and activates it with a single atomic directory rename — the legacy file is left untouched for rollback. Re-running against an active layout is a safe no-op. `mem storage purge --project <id>` deletes exactly that project's managed database and SQLite sidecars after confirmation (`--yes` to skip). The default storage location does not change until the rollout completes.
+A per-project/user managed layout (`layout-v1/` with `user.db` and `projects/<encoded>/mem.db`) is being rolled out in slices. `mem storage status` reports the managed-layout inventory (layout version and paths, legacy `memory.db` presence, per-store schema/counts/queue state, migration-needed state) without creating any files. Managed `index run` covers the current project database plus the user database; `index run --all` additionally covers every existing managed project database. The low-level worker protocol (`index claim|commit|complete|retry`) is pinned to one exact database. The remaining rollout item is dogfooding the managed default; the storage layout itself is complete: scoped routing, index routing, staged migration, and purge are all active.
 
 ## Memory model
 

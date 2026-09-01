@@ -33,9 +33,9 @@ pi install ./integrations/pi
 ## Environment
 
 - `MEM_BIN`: executable path or command name. Defaults to `mem`.
-- `MEM_DB`: optional SQLite database path passed to every adapter invocation. If unset, `mem` uses its normal default database.
+- `MEM_DB`: optional exact SQLite database path passed to every adapter invocation. If unset, `mem` uses its managed per-project/user layout (see the core README's "Data location").
 
-`MEM_DB` is useful for isolated tests or separate agent profiles without wrapping the CLI.
+`MEM_DB` is useful for isolated tests or separate agent profiles without wrapping the CLI. Adapter shutdown indexing (`index run --cached-only`) follows the same routing: without `MEM_DB` it covers the current project database plus the user store.
 
 ## Local smoke test
 
