@@ -230,6 +230,9 @@ mod tests {
         let alpha = remember(&mut store, "alpha candidate", Some("alpha"));
         let beta = remember(&mut store, "beta candidate", Some("beta"));
 
+        // The commit path is production-model-only (tested in embedding.rs);
+        // search-layer tests seed vectors directly, including under arbitrary
+        // model IDs, to exercise scoping and scoring independently.
         let jobs = store
             .claim_index_jobs("worker", 3, Duration::from_secs(30))
             .expect("claim embedding work");
@@ -242,17 +245,20 @@ mod tests {
                 assert_eq!(job.entity_id, beta.id);
                 [1.0, 0.0]
             };
-            assert!(
-                store
-                    .commit_embedding(
-                        &job.id,
-                        job.generation,
-                        &job.lease_token,
-                        "test-model",
-                        &vector,
-                    )
-                    .expect("commit embedding")
+            seed_vector(
+                &store,
+                &job.entity_id,
+                "test-model",
+                &vector,
+                job.generation,
             );
+            store
+                .connection
+                .execute(
+                    "DELETE FROM index_jobs WHERE id = ?1",
+                    rusqlite::params![job.id],
+                )
+                .expect("consume seeded job");
         }
 
         let alpha_hits = store
@@ -301,17 +307,20 @@ mod tests {
             .expect("claim embedding work");
         assert_eq!(jobs.len(), 3);
         for job in &jobs {
-            assert!(
-                store
-                    .commit_embedding(
-                        &job.id,
-                        job.generation,
-                        &job.lease_token,
-                        "prod-model",
-                        &[1.0, 0.0],
-                    )
-                    .expect("commit embedding")
+            seed_vector(
+                &store,
+                &job.entity_id,
+                "prod-model",
+                &[1.0, 0.0],
+                job.generation,
             );
+            store
+                .connection
+                .execute(
+                    "DELETE FROM index_jobs WHERE id = ?1",
+                    rusqlite::params![job.id],
+                )
+                .expect("consume seeded job");
         }
 
         // Full current-model coverage across the visible scope (project +
@@ -339,6 +348,7 @@ mod tests {
         // A newly remembered memory in the same scope breaks coverage until
         // its embedding job is consumed.
         let fresh = remember(&mut store, "fresh alpha fact", Some("alpha"));
+        let _ = fresh;
         assert!(
             !store
                 .has_complete_scope_coverage("prod-model", Some("alpha"))
@@ -358,17 +368,20 @@ mod tests {
             .pop()
             .expect("fresh job");
         assert_eq!(job.entity_id, fresh.id);
-        assert!(
-            store
-                .commit_embedding(
-                    &job.id,
-                    job.generation,
-                    &job.lease_token,
-                    "prod-model",
-                    &[0.0, 1.0],
-                )
-                .expect("commit fresh embedding")
+        seed_vector(
+            &store,
+            &job.entity_id,
+            "prod-model",
+            &[0.0, 1.0],
+            job.generation,
         );
+        store
+            .connection
+            .execute(
+                "DELETE FROM index_jobs WHERE id = ?1",
+                rusqlite::params![job.id],
+            )
+            .expect("consume fresh job");
         assert!(
             store
                 .has_complete_scope_coverage("prod-model", Some("alpha"))
@@ -390,6 +403,32 @@ mod tests {
 
         drop(store);
         cleanup(&path);
+    }
+
+    fn seed_vector(store: &Store, entity_id: &str, model: &str, vector: &[f32], generation: i64) {
+        let mut encoded = Vec::with_capacity(std::mem::size_of_val(vector));
+        for value in vector {
+            encoded.extend_from_slice(&value.to_le_bytes());
+        }
+        store
+            .connection
+            .execute(
+                "INSERT INTO embeddings (
+                     entity_type, entity_id, model, dimensions, vector, source_generation, updated_at
+                 ) VALUES ('memory', ?1, ?2, ?3, ?4, ?5, 0)
+                 ON CONFLICT(entity_type, entity_id, model) DO UPDATE SET
+                     dimensions = excluded.dimensions,
+                     vector = excluded.vector,
+                     source_generation = excluded.source_generation",
+                rusqlite::params![
+                    entity_id,
+                    model,
+                    vector.len() as i64,
+                    encoded,
+                    generation
+                ],
+            )
+            .expect("seed test vector");
     }
 
     fn remember(store: &mut Store, text: &str, project_id: Option<&str>) -> crate::store::Memory {

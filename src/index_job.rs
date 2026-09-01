@@ -1,7 +1,7 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use rusqlite::{TransactionBehavior, params};
+use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -150,11 +150,34 @@ impl Store {
         lease_token: &str,
     ) -> Result<bool> {
         validate_completion(job_id, generation, lease_token)?;
+        self.reject_embedding_completion(job_id)?;
         Ok(self.connection.execute(
             "DELETE FROM index_jobs\n\
              WHERE id = ?1 AND generation = ?2 AND state = 'running' AND lease_token = ?3",
             params![job_id, generation, lease_token],
         )? == 1)
+    }
+
+    /// An embedding job may only be consumed through `commit_embedding`, which
+    /// persists a production-model vector first. Bare completion would let an
+    /// arbitrary prior vector (for example one stored under a non-production
+    /// model) satisfy the job without producing the vector semantic retrieval
+    /// needs.
+    fn reject_embedding_completion(&self, job_id: &str) -> Result<()> {
+        let kind: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT index_kind FROM index_jobs WHERE id = ?1",
+                [job_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if kind.as_deref() == Some("embedding") {
+            bail!(
+                "embedding job cannot complete without a committed production-model vector; use index commit"
+            );
+        }
+        Ok(())
     }
 
     pub fn retry_index_job(
@@ -214,6 +237,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::Store;
+    use crate::embedding_worker::EMBEDDING_MODEL_ID;
     use crate::episode::{NewEpisode, NewEpisodeEntry};
     use crate::store::NewMemory;
 
@@ -254,8 +278,9 @@ mod tests {
             )
             .expect_err("bare completion must not discard embedding work");
         assert!(
-            format!("{error:#}")
-                .contains("embedding job cannot complete without a persisted result")
+            format!("{error:#}").contains(
+                "embedding job cannot complete without a committed production-model vector"
+            )
         );
         let stats = store.index_job_stats().expect("read protected stats");
         assert_eq!(stats.pending, 0);
@@ -318,8 +343,14 @@ mod tests {
 
         assert!(
             !store
-                .complete_index_job(&first.id, first.generation, &first.lease_token)
-                .expect("reject stale completion")
+                .commit_embedding(
+                    &first.id,
+                    first.generation,
+                    &first.lease_token,
+                    EMBEDDING_MODEL_ID,
+                    &[1.0, 0.0]
+                )
+                .expect("reject stale commit")
         );
         let second = store
             .claim_index_jobs("worker-b", 1, Duration::from_secs(30))
@@ -372,8 +403,14 @@ mod tests {
         assert_ne!(second.lease_token, first.lease_token);
         assert!(
             !store
-                .complete_index_job(&first.id, first.generation, &first.lease_token)
-                .expect("old lease cannot complete")
+                .commit_embedding(
+                    &first.id,
+                    first.generation,
+                    &first.lease_token,
+                    EMBEDDING_MODEL_ID,
+                    &[1.0, 0.0]
+                )
+                .expect("old lease cannot commit")
         );
 
         drop(store);

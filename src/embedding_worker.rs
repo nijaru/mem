@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
-use rusqlite::OptionalExtension;
+use rusqlite::{OptionalExtension, params};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -40,6 +40,8 @@ impl Store {
     ) -> Result<EmbeddingRunStats> {
         validate_options(&options)?;
         ensure_cache_dir(&options.cache_dir)?;
+
+        self.backfill_missing_production_embeddings()?;
 
         let worker_id = format!("mem-{}", Uuid::now_v7());
         let jobs = self.claim_index_jobs(&worker_id, options.limit, options.lease_duration)?;
@@ -129,6 +131,43 @@ impl Store {
         }
 
         Ok(stats)
+    }
+
+    /// Re-enqueue embedding work for active semantic memories that have no
+    /// vector for the current production model and no outstanding job row.
+    /// A production model change (or a historical job consumed before this
+    /// invariant existed) must not leave canonical sources permanently
+    /// unembedded: `index run` rediscovers the missing work. Job rows reuse
+    /// the trigger ID scheme (`memory:<id>:embedding`) with generation 1 so a
+    /// later canonical write conflict-bumps instead of duplicating.
+    fn backfill_missing_production_embeddings(&self) -> Result<()> {
+        let now = unix_millis_for_backfill()?;
+        self.connection.execute(
+            "INSERT INTO index_jobs (
+                 id, entity_type, entity_id, index_kind, generation, state, attempts,
+                 available_at, lease_owner, lease_token, lease_until, last_error, created_at, updated_at
+             )
+             SELECT
+                 'memory:' || m.id || ':embedding', 'memory', m.id, 'embedding', 1, 'pending', 0,
+                 ?1, NULL, NULL, NULL, NULL, m.created_at, m.updated_at
+             FROM memories AS m
+             WHERE m.status = 'active'
+               AND NOT EXISTS (
+                   SELECT 1 FROM embeddings AS e
+                   WHERE e.entity_type = 'memory'
+                     AND e.entity_id = m.id
+                     AND e.model = ?2
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM index_jobs AS j
+                   WHERE j.entity_type = 'memory'
+                     AND j.entity_id = m.id
+                     AND j.index_kind = 'embedding'
+               )
+             ON CONFLICT(entity_type, entity_id, index_kind) DO NOTHING",
+            params![now, EMBEDDING_MODEL_ID],
+        )?;
+        Ok(())
     }
 
     fn embedding_source_text(&self, job: &ClaimedIndexJob) -> Result<Option<String>> {
@@ -291,6 +330,13 @@ fn validate_options(options: &EmbeddingRunOptions) -> Result<()> {
     Ok(())
 }
 
+fn unix_millis_for_backfill() -> Result<i64> {
+    let duration = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("system clock is before the Unix epoch")?;
+    Ok(i64::try_from(duration.as_millis())?)
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -302,6 +348,166 @@ mod tests {
     };
     use crate::episode::{NewEpisode, NewEpisodeEntry};
     use crate::store::NewMemory;
+
+    #[test]
+    fn index_run_backfills_missing_production_model_vectors() {
+        // Production-failure regression: a job consumed before this invariant
+        // existed could leave an active memory with only a wrong-model vector
+        // (or none at all) and no pending work. `index run` must rediscover
+        // the missing production-model embedding work before claiming.
+        let path = test_path();
+        let mut store = Store::open(&path).expect("open test store");
+        let covered = remember(&mut store, "already covered by production model");
+        let legacy = remember(&mut store, "historically embedded under an old model");
+        let episode = store
+            .ensure_episode(NewEpisode {
+                project_id: None,
+                workspace_id: None,
+                source_type: "test-session".to_owned(),
+                source_ref: "session-1".to_owned(),
+                started_at: Some(10),
+                metadata_json: None,
+            })
+            .expect("create episode");
+        store
+            .record_episode_entry(
+                &episode.id,
+                NewEpisodeEntry {
+                    source_ref: "message-1".to_owned(),
+                    ordinal: Some(0),
+                    kind: "message".to_owned(),
+                    role: None,
+                    text: "episode entry text".to_owned(),
+                    occurred_at: Some(20),
+                    metadata_json: None,
+                },
+            )
+            .expect("record entry");
+
+        // Simulate the historical wrong-model consumption: claim all three
+        // jobs and consume them as a pre-guard database would — `covered` got
+        // a production-model vector, `legacy` only an old-model one, and the
+        // episode entry nothing.
+        let claimed = store
+            .claim_index_jobs("worker-a", 10, Duration::from_secs(30))
+            .expect("claim all jobs");
+        assert_eq!(claimed.len(), 3);
+        for job in &claimed {
+            if job.entity_id == covered.id {
+                store
+                    .connection
+                    .execute(
+                        "INSERT INTO embeddings (
+                             entity_type, entity_id, model, dimensions, vector, source_generation, updated_at
+                         ) VALUES ('memory', ?1, ?2, 2, X'0000803F00000000', ?3, 0)
+                         ON CONFLICT(entity_type, entity_id, model) DO UPDATE SET
+                             source_generation = excluded.source_generation",
+                        rusqlite::params![job.entity_id, EMBEDDING_MODEL_ID, job.generation],
+                    )
+                    .expect("insert production vector for covered");
+            } else {
+                // Pre-guard databases embedded episode entries too; give this
+                // job the same-generation vector the trigger requires.
+                store
+                    .connection
+                    .execute(
+                        "INSERT INTO embeddings (
+                             entity_type, entity_id, model, dimensions, vector, source_generation, updated_at
+                         ) VALUES (?1, ?2, 'old-model', 2, X'0000803F00000000', ?3, 0)
+                         ON CONFLICT(entity_type, entity_id, model) DO UPDATE SET
+                             source_generation = excluded.source_generation",
+                        rusqlite::params![job.entity_type, job.entity_id, job.generation],
+                    )
+                    .expect("insert legacy vector");
+            }
+            store
+                .connection
+                .execute(
+                    "DELETE FROM index_jobs WHERE id = ?1",
+                    rusqlite::params![job.id],
+                )
+                .expect("consume job without the guard");
+        }
+        let stats = store.index_job_stats().expect("queue is empty");
+        assert_eq!(stats.pending + stats.running, 0);
+
+        // The production-model vector only exists for `covered`; `legacy`
+        // holds a wrong-model vector. Backfill must requeue `legacy` only.
+        store
+            .backfill_missing_production_embeddings()
+            .expect("run backfill");
+        let pending: Vec<String> = store
+            .connection
+            .prepare("SELECT entity_id FROM index_jobs WHERE state = 'pending'")
+            .expect("prepare pending query")
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("map pending rows")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("collect pending rows");
+        let legacy_id = legacy.id.clone();
+        assert_eq!(
+            pending,
+            vec![legacy_id.clone()],
+            "only the uncovered memory is requeued"
+        );
+
+        // The episode entry is also uncovered by the production model, but
+        // episode-entry vectors have no reader yet (Step 3 disables them), so
+        // backfill deliberately requeues memories only.
+        assert!(pending.iter().all(|id| id != "episode entry"));
+
+        // Claiming the backfilled job and committing a production-model
+        // vector completes the recovery.
+        let job = store
+            .claim_index_jobs("worker-b", 1, Duration::from_secs(30))
+            .expect("claim backfilled work")
+            .pop()
+            .expect("backfilled job");
+        assert_eq!(job.entity_id, legacy_id);
+        assert!(
+            store
+                .commit_embedding(
+                    &job.id,
+                    job.generation,
+                    &job.lease_token,
+                    EMBEDDING_MODEL_ID,
+                    &[1.0, 1.0],
+                )
+                .expect("commit production vector")
+        );
+        let covered_count: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM embeddings WHERE model = ?1 AND entity_type = 'memory'",
+                rusqlite::params![EMBEDDING_MODEL_ID],
+                |row| row.get(0),
+            )
+            .expect("count production vectors");
+        assert_eq!(covered_count, 2, "both memories are now production-covered");
+
+        // A second backfill is a no-op: the vector now exists.
+        store
+            .backfill_missing_production_embeddings()
+            .expect("run backfill again");
+        let stats = store.index_job_stats().expect("read stats");
+        assert_eq!(stats.pending + stats.running, 0, "no duplicate work");
+
+        drop(store);
+        cleanup(&path);
+    }
+
+    fn remember(store: &mut Store, text: &str) -> crate::store::Memory {
+        store
+            .remember(NewMemory {
+                text: text.to_owned(),
+                kind: "fact".to_owned(),
+                project_id: None,
+                actor: "agent".to_owned(),
+                source_type: "test".to_owned(),
+                source_ref: None,
+            })
+            .expect("store memory")
+    }
 
     #[test]
     fn claimed_jobs_resolve_only_current_canonical_text() {

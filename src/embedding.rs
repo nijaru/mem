@@ -3,9 +3,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 
+use crate::embedding_worker::EMBEDDING_MODEL_ID;
 use crate::store::Store;
 
 impl Store {
+    /// Commit one embedding result and consume its exact claimed lease.
+    /// The vector store keys one production embedding model per entity; a
+    /// commit naming any other model would permanently satisfy the job
+    /// without producing the vector semantic retrieval needs, so non-production
+    /// models are rejected outright.
     pub fn commit_embedding(
         &mut self,
         job_id: &str,
@@ -15,6 +21,11 @@ impl Store {
         vector: &[f32],
     ) -> Result<bool> {
         validate_commit(job_id, generation, lease_token, model, vector)?;
+        if model != EMBEDDING_MODEL_ID {
+            bail!(
+                "embedding commit requires the production model {EMBEDDING_MODEL_ID}; got {model}"
+            );
+        }
         let normalized = normalize(vector)?;
         let encoded = encode_vector(&normalized);
         let dimensions = i64::try_from(normalized.len())?;
@@ -142,9 +153,10 @@ mod tests {
 
     use uuid::Uuid;
 
-    use super::Store;
+    use super::{EMBEDDING_MODEL_ID, Store};
     use crate::episode::{NewEpisode, NewEpisodeEntry};
     use crate::store::NewMemory;
+    use rusqlite::params;
 
     #[test]
     fn embedding_commit_is_atomic_normalized_and_consumes_lease() {
@@ -166,13 +178,41 @@ mod tests {
             .pop()
             .expect("claimed job");
 
+        let error = store
+            .commit_embedding(
+                &job.id,
+                job.generation,
+                &job.lease_token,
+                "other-model",
+                &[3.0, 4.0],
+            )
+            .expect_err("non-production model must be rejected");
+        assert!(
+            format!("{error:#}").contains("requires the production model"),
+            "unexpected rejection message: {error:#}"
+        );
+        let stats = store.index_job_stats().expect("read queue stats");
+        assert_eq!(
+            stats.running, 1,
+            "rejected commit must not consume the lease"
+        );
+        let stray_count: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM embeddings WHERE model = 'other-model'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count stray vectors");
+        assert_eq!(stray_count, 0, "rejected commit must not persist a vector");
+
         assert!(
             store
                 .commit_embedding(
                     &job.id,
                     job.generation,
                     &job.lease_token,
-                    "test-model",
+                    EMBEDDING_MODEL_ID,
                     &[3.0, 4.0],
                 )
                 .expect("commit embedding")
@@ -187,8 +227,8 @@ mod tests {
             .query_row(
                 "SELECT dimensions, vector, source_generation\n\
                  FROM embeddings\n\
-                 WHERE entity_type = 'memory' AND entity_id = ?1 AND model = 'test-model'",
-                [&memory.id],
+                 WHERE entity_type = 'memory' AND entity_id = ?1 AND model = ?2",
+                params![&memory.id, EMBEDDING_MODEL_ID],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .expect("read stored embedding");
@@ -257,7 +297,7 @@ mod tests {
                     &stale.id,
                     stale.generation,
                     &stale.lease_token,
-                    "test-model",
+                    EMBEDDING_MODEL_ID,
                     &[1.0, 0.0],
                 )
                 .expect("reject stale embedding")
@@ -322,7 +362,7 @@ mod tests {
                     &job.id,
                     job.generation,
                     &job.lease_token,
-                    "test-model",
+                    EMBEDDING_MODEL_ID,
                     &[1.0, 1.0],
                 )
                 .expect("commit vector")
