@@ -4,6 +4,7 @@ mod episode;
 mod index_job;
 mod project;
 mod storage;
+mod storage_migration;
 mod store;
 mod vector_search;
 
@@ -21,7 +22,7 @@ use crate::embedding_worker::{
 };
 use crate::episode::{NewEpisode, NewEpisodeEntry};
 use crate::project::ProjectContext;
-use crate::storage::{ManagedLayout, StorageRouter};
+use crate::storage::{ManagedLayout, ProjectDb, StorageRouter};
 
 /// The low-level worker protocol operates on one exact database. In managed
 /// operation the caller must pin the database with `--db`/`MEM_DB`.
@@ -1188,15 +1189,67 @@ fn run(cli: MemCli) -> Result<()> {
                     }
                 }
             }
-            StorageSubcommand::Migrate(_) => {
-                bail!(
-                    "storage migrate is not implemented yet; a following release adds staged whole-layout migration"
-                )
+            StorageSubcommand::Migrate(command) => {
+                let layout = if let Some(from) = &command.from {
+                    ManagedLayout::at(PathBuf::from(from))
+                } else {
+                    ManagedLayout::resolve()?
+                };
+                let report = storage_migration::migrate_layout(&layout)?;
+                if cli.json {
+                    print_json(&report)?;
+                } else {
+                    match report.state {
+                        storage_migration::MigrationState::AlreadyActive => {
+                            println!(
+                                "layout already active at {}; nothing to migrate",
+                                report.layout_dir
+                            );
+                        }
+                        storage_migration::MigrationState::NoLegacyStore => {
+                            println!(
+                                "no legacy store at {}; nothing to migrate",
+                                report.legacy_db
+                            );
+                        }
+                        storage_migration::MigrationState::Migrated => {
+                            println!("migrated {} memories", report.memories);
+                            println!("migrated {} episodes", report.episodes);
+                            println!("migrated {} workspaces", report.workspaces);
+                            for store in &report.stores {
+                                println!("store: {store}");
+                            }
+                            println!("legacy store left untouched at {}", report.legacy_db);
+                        }
+                    }
+                }
             }
-            StorageSubcommand::Purge(_) => {
-                bail!(
-                    "storage purge is not implemented yet; a following release adds managed project purge"
-                )
+            StorageSubcommand::Purge(command) => {
+                let layout = ManagedLayout::resolve()?;
+                if command.project.trim().is_empty() {
+                    bail!("project identifier cannot be empty");
+                }
+                let ProjectDb { path, .. } = layout.project_db(&command.project)?;
+                if !command.yes && !cli.json {
+                    let mut answer = String::new();
+                    println!(
+                        "purge project {} (database {})? This cannot be undone. [y/N]",
+                        command.project,
+                        path.display()
+                    );
+                    std::io::stdin().read_line(&mut answer)?;
+                    if !answer.trim().eq_ignore_ascii_case("y") {
+                        bail!("purge cancelled");
+                    }
+                }
+                let report = storage_migration::purge_project_db(&layout, &command.project)?;
+                if cli.json {
+                    print_json(&report)?;
+                } else if report.removed {
+                    println!("purged {}", report.path);
+                } else {
+                    println!("no managed database for {}", report.project_id);
+                }
             }
         },
     }
