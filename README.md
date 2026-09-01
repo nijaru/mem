@@ -174,10 +174,10 @@ Supported commands can override automatic detection with `--project` and `--work
 Semantic search uses SQLite FTS5 immediately; no external service or model is required.
 
 - `mem search` uses precise lexical `AND` matching.
-- `mem context` ranks semantically when the local embedding model is already cached and indexed vectors are available, and falls back to broader lexical `OR` recall otherwise. `--lexical` forces the lexical baseline.
+- `mem context` ranks semantically when the local embedding model is already cached and every active memory visible in the query scope has a current-model vector, and falls back to broader lexical `OR` recall otherwise. `--lexical` forces the lexical baseline.
 - superseded and deleted memories remain in canonical storage but are excluded from active retrieval.
 
-Vector retrieval is derived from the canonical SQLite data and is not required for correctness. `mem context` never downloads the embedding model; run `mem index run` (or an explicit `mem search --semantic`) once to populate the local model cache and vectors.
+Vector retrieval is derived from the canonical SQLite data and is not required for correctness. Incomplete embedding coverage (for example, a just-remembered memory whose indexing job is still queued) makes `mem context` use lexical recall so no active memory can disappear. `mem context` never downloads the embedding model; run `mem index run` (or an explicit `mem search --semantic`) once to populate the local model cache and vectors.
 
 ## Data location
 

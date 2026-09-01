@@ -145,6 +145,108 @@ fn compare_lexical_semantic_and_rrf_retrieval() {
     cleanup(&db);
 }
 
+#[test]
+#[ignore = "loads the cached embedding model; intended for the retrieval-eval workflow"]
+fn incomplete_embedding_coverage_never_hides_active_memories() {
+    // Reproduces the production failure: the model is cached and older
+    // memories are embedded, so a naive "any embedding exists" gate would
+    // activate semantic ranking, which joins from the embeddings table and
+    // silently hides any active memory whose indexing job is still queued.
+    let db = test_path();
+    let embedded = remember_text(
+        &db,
+        "Deployments require glibc 2.35 on Ubuntu 22.04 for the ort runtime.",
+        Some(PROJECT),
+    );
+    run_json(&db, &["index", "run", "-n", "1"]);
+
+    // A fresh memory with a pending embedding job must stay visible.
+    let fresh = remember_text(
+        &db,
+        "Paraphrase queries with no shared vocabulary still rank semantically in the retrieval evaluation.",
+        Some(PROJECT),
+    );
+    let ids = context_ids(&db, "shared vocabulary rank semantically", false);
+    assert!(
+        ids.contains(&fresh),
+        "fresh memory must stay visible while its embedding job is queued: {ids:?}"
+    );
+
+    // After indexing completes, full coverage lets semantic ranking activate.
+    // Semantic search returns every visible active memory regardless of query
+    // overlap, while lexical OR over this query matches nothing, so finding
+    // both memories proves semantic mode is active.
+    run_json(&db, &["index", "run", "-n", "64"]);
+    let ids = context_ids(
+        &db,
+        "what system library does the linux machine need",
+        false,
+    );
+    assert!(
+        ids.contains(&embedded) && ids.contains(&fresh),
+        "fully indexed memories must be retrievable under semantic ranking: {ids:?}"
+    );
+
+    // Supersession queues a replacement: the replacement is fresh (no
+    // vector) and the predecessor is superseded (invisible), so recall must
+    // fall back to lexical and keep the replacement visible.
+    let corrected = run_json(
+        &db,
+        &[
+            "correct",
+            &fresh,
+            "Paraphrase retrieval keeps working after a correction supersedes the earlier phrasing.",
+            "--source-type",
+            "test",
+        ],
+    );
+    let replacement = corrected["replacement"]["memory"]["id"]
+        .as_str()
+        .expect("correct JSON should contain replacement memory ID")
+        .to_owned();
+    let ids = context_ids(&db, "correction supersedes earlier phrasing", false);
+    assert!(
+        ids.contains(&replacement),
+        "replacement memory must stay visible while its embedding job is queued: {ids:?}"
+    );
+    assert!(
+        !ids.contains(&fresh),
+        "superseded predecessor must not appear in recall: {ids:?}"
+    );
+
+    // Re-indexing restores complete coverage and semantic ranking, now over
+    // the replacement instead of its superseded predecessor.
+    run_json(&db, &["index", "run", "-n", "64"]);
+    let ids = context_ids(
+        &db,
+        "what system library does the linux machine need",
+        false,
+    );
+    assert!(
+        ids.contains(&embedded) && ids.contains(&replacement),
+        "replacement must be retrievable under semantic ranking after re-indexing: {ids:?}"
+    );
+    assert!(
+        !ids.contains(&fresh),
+        "superseded predecessor must stay out of semantic recall: {ids:?}"
+    );
+
+    cleanup(&db);
+}
+
+fn remember_text(db: &Path, text: &str, project: Option<&str>) -> String {
+    let mut args = vec!["remember", text];
+    if let Some(project) = project {
+        args.extend(["--project", project]);
+    } else {
+        args.push("--global");
+    }
+    run_json(db, &args)["id"]
+        .as_str()
+        .expect("remember JSON should contain memory ID")
+        .to_owned()
+}
+
 fn corpus() -> Vec<Seed<'static>> {
     vec![
         Seed {
@@ -328,6 +430,10 @@ fn remember(db: &Path, seed: &Seed<'_>) -> Value {
 }
 
 fn context_ids(db: &Path, query: &str, lexical: bool) -> Vec<String> {
+    context_ids_env(db, query, lexical, &[])
+}
+
+fn context_ids_env(db: &Path, query: &str, lexical: bool, env: &[(&str, &str)]) -> Vec<String> {
     let limit = LIMIT.to_string();
     let mut args = vec![
         "context",
@@ -342,7 +448,7 @@ fn context_ids(db: &Path, query: &str, lexical: bool) -> Vec<String> {
     if lexical {
         args.push("--lexical");
     }
-    run_json(db, &args)["memories"]
+    run_json_env(db, &args, env)["memories"]
         .as_array()
         .expect("context memories array")
         .iter()
@@ -419,7 +525,15 @@ fn display_rank(rank: Option<usize>) -> String {
 }
 
 fn run_json(db: &Path, args: &[&str]) -> Value {
-    let output = mem_command(db, args).output().expect("run mem subprocess");
+    run_json_env(db, args, &[])
+}
+
+fn run_json_env(db: &Path, args: &[&str], env: &[(&str, &str)]) -> Value {
+    let mut command = mem_command(db, args);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let output = command.output().expect("run mem subprocess");
     assert!(
         output.status.success(),
         "mem {:?} failed:\nstdout: {}\nstderr: {}",

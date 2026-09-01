@@ -19,25 +19,46 @@ struct VectorCandidate {
 }
 
 impl Store {
-    /// Whether any active memory visible in this scope has a stored vector for
-    /// the model. Adapter-facing semantic-first recall uses this to distinguish
-    /// "ranking is possible" from "nothing embedded yet".
-    pub fn has_scope_embeddings(&self, model: &str, project_id: Option<&str>) -> Result<bool> {
+    /// Whether every active memory visible in this scope has a stored vector
+    /// for the model (complete coverage). Adapter-facing semantic-first recall
+    /// uses this as a correctness gate: semantic ranking joins from the
+    /// embeddings table, so any visible active memory without a vector would
+    /// silently disappear from recall. Incomplete coverage must fall back to
+    /// lexical retrieval instead.
+    pub fn has_complete_scope_coverage(
+        &self,
+        model: &str,
+        project_id: Option<&str>,
+    ) -> Result<bool> {
         if model.trim().is_empty() {
             bail!("embedding model identifier cannot be empty");
         }
-        let count: i64 = self.connection.query_row(
+        let covered: i64 = self.connection.query_row(
             "SELECT COUNT(*)
-             FROM embeddings AS e
-             JOIN memories AS m ON m.id = e.entity_id
-             WHERE e.entity_type = 'memory'
-               AND e.model = ?1
-               AND m.status = 'active'
-               AND (m.project_id IS NULL OR m.project_id = ?2)",
+             FROM memories AS m
+             WHERE m.status = 'active'
+               AND (m.project_id IS NULL OR m.project_id = ?2)
+               AND EXISTS (
+                   SELECT 1 FROM embeddings AS e
+                   WHERE e.entity_type = 'memory'
+                     AND e.entity_id = m.id
+                     AND e.model = ?1
+               )",
             params![model, project_id],
             |row| row.get(0),
         )?;
-        Ok(count > 0)
+        if covered == 0 {
+            return Ok(false);
+        }
+        let visible: i64 = self.connection.query_row(
+            "SELECT COUNT(*)
+             FROM memories AS m
+             WHERE m.status = 'active'
+               AND (m.project_id IS NULL OR m.project_id = ?1)",
+            params![project_id],
+            |row| row.get(0),
+        )?;
+        Ok(covered == visible)
     }
 
     pub fn semantic_search_by_vector(
@@ -248,6 +269,124 @@ mod tests {
             .expect("search global scope");
         assert_eq!(global_hits.len(), 1);
         assert_eq!(global_hits[0].memory.id, global.id);
+
+        drop(store);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn coverage_gate_counts_only_active_visible_current_model_vectors() {
+        let path = test_path();
+        let mut store = Store::open(&path).expect("open test store");
+        let _global = remember(&mut store, "global candidate", None);
+        let _alpha = remember(&mut store, "alpha candidate", Some("alpha"));
+        let _beta = remember(&mut store, "beta candidate", Some("beta"));
+
+        // Empty scope: no vectors, no active visible rows -> no semantic mode.
+        assert!(
+            !store
+                .has_complete_scope_coverage("prod-model", None)
+                .expect("gate global empty")
+        );
+        assert!(
+            !store
+                .has_complete_scope_coverage("prod-model", Some("alpha"))
+                .expect("gate alpha empty")
+        );
+
+        // Embed each memory through the queue protocol with production-model
+        // vectors.
+        let jobs = store
+            .claim_index_jobs("worker", 3, Duration::from_secs(30))
+            .expect("claim embedding work");
+        assert_eq!(jobs.len(), 3);
+        for job in &jobs {
+            assert!(
+                store
+                    .commit_embedding(
+                        &job.id,
+                        job.generation,
+                        &job.lease_token,
+                        "prod-model",
+                        &[1.0, 0.0],
+                    )
+                    .expect("commit embedding")
+            );
+        }
+
+        // Full current-model coverage across the visible scope (project +
+        // global memories) unlocks semantic mode; the other project is
+        // invisible to this scope and irrelevant.
+        assert!(
+            store
+                .has_complete_scope_coverage("prod-model", Some("alpha"))
+                .expect("gate alpha full")
+        );
+        assert!(
+            store
+                .has_complete_scope_coverage("prod-model", None)
+                .expect("gate global full")
+        );
+
+        // A vector under another model ID does not count toward coverage of
+        // the production model.
+        assert!(
+            !store
+                .has_complete_scope_coverage("other-model", Some("alpha"))
+                .expect("gate wrong model")
+        );
+
+        // A newly remembered memory in the same scope breaks coverage until
+        // its embedding job is consumed.
+        let fresh = remember(&mut store, "fresh alpha fact", Some("alpha"));
+        assert!(
+            !store
+                .has_complete_scope_coverage("prod-model", Some("alpha"))
+                .expect("gate partial")
+        );
+        // The global-only scope is unaffected by the alpha-scoped addition.
+        assert!(
+            store
+                .has_complete_scope_coverage("prod-model", None)
+                .expect("gate global still full")
+        );
+
+        // Consuming the fresh job restores complete coverage.
+        let job = store
+            .claim_index_jobs("worker", 1, Duration::from_secs(30))
+            .expect("claim fresh work")
+            .pop()
+            .expect("fresh job");
+        assert_eq!(job.entity_id, fresh.id);
+        assert!(
+            store
+                .commit_embedding(
+                    &job.id,
+                    job.generation,
+                    &job.lease_token,
+                    "prod-model",
+                    &[0.0, 1.0],
+                )
+                .expect("commit fresh embedding")
+        );
+        assert!(
+            store
+                .has_complete_scope_coverage("prod-model", Some("alpha"))
+                .expect("gate full again")
+        );
+
+        // Superseding a memory removes it from the visible active set; the
+        // still-covered remainder keeps semantic mode unlocked.
+        store.forget(&fresh.id).expect("delete fresh memory");
+        assert!(
+            store
+                .has_complete_scope_coverage("prod-model", Some("alpha"))
+                .expect("gate ignores inactive rows")
+        );
+        let alpha_hits = store
+            .semantic_search_by_vector(&[1.0, 0.0], "prod-model", Some("alpha"), 10)
+            .expect("search still works");
+        assert!(alpha_hits.iter().all(|hit| hit.memory.id != fresh.id));
 
         drop(store);
         cleanup(&path);

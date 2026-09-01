@@ -1085,9 +1085,10 @@ fn memory_project(explicit: Option<&str>, global: bool) -> Result<Option<String>
 
 /// Semantic-first recall with lexical-OR fallback for `mem context`.
 /// Embeddings are a derived enhancement: when the model is not cached, the
-/// cache directory cannot be determined, nothing in scope is embedded yet,
-/// or local embedding fails, recall degrades to the FTS5 baseline without
-/// touching the network or failing the command.
+/// cache directory cannot be determined, local embedding fails, or any
+/// visible active memory still lacks a current-model vector, recall degrades
+/// to the FTS5 baseline. Incomplete embedding coverage must never make a
+/// canonical active memory disappear from recall.
 fn recall_hits(
     store: &Store,
     query: &str,
@@ -1096,7 +1097,7 @@ fn recall_hits(
     force_lexical: bool,
 ) -> Result<Vec<SearchHit>> {
     if !force_lexical
-        && store.has_scope_embeddings(EMBEDDING_MODEL_ID, project_id)?
+        && store.has_complete_scope_coverage(EMBEDDING_MODEL_ID, project_id)?
         && let Some(query_vector) = cached_query_vector(query)?
     {
         let hits = store.semantic_search_by_vector(
