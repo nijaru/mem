@@ -5,6 +5,8 @@ const MEM_DB = process.env.MEM_DB?.trim();
 const RECALL_LIMIT = 8;
 const MAX_EPISODE_TEXT_BYTES = 16 * 1024;
 const COMMAND_TIMEOUT_MS = 15_000;
+const SHUTDOWN_INDEX_TIMEOUT_MS = 60_000;
+const SHUTDOWN_INDEX_BATCH = 16;
 const RECALL_CUSTOM_TYPE = "mem-recall";
 
 interface MemContextOutput {
@@ -151,6 +153,22 @@ export default function memExtension(pi: ExtensionAPI) {
     }
   };
 
+  // Catch up on queued semantic-memory embedding work at shutdown. Bounded
+  // and cached-only so it can never delay exit on a model download or an
+  // unbounded backlog. Pending work is re-discovered by the next index run,
+  // so failures are silent by design.
+  const runShutdownIndexing = async (ctx: ExtensionContext) => {
+    try {
+      await pi.exec(
+        MEM_BIN,
+        ["--json", ...(MEM_DB ? ["--db", MEM_DB] : []), "index", "run", "-n", String(SHUTDOWN_INDEX_BATCH), "--lease-seconds", "60", "--cached-only"],
+        { cwd: ctx.cwd, timeout: SHUTDOWN_INDEX_TIMEOUT_MS },
+      );
+    } catch {
+      // Fail open: indexing is derived data, never required for correctness.
+    }
+  };
+
   pi.on("session_start", async (_event, ctx) => {
     episodeId = undefined;
     episodeSourceRef = undefined;
@@ -206,6 +224,7 @@ export default function memExtension(pi: ExtensionAPI) {
   pi.on("session_shutdown", async (_event, ctx) => {
     await flushHistory(ctx);
     turnRecall = undefined;
+    await runShutdownIndexing(ctx);
   });
 }
 

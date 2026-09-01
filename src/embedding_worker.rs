@@ -20,6 +20,9 @@ pub struct EmbeddingRunOptions {
     pub retry_delay: Duration,
     pub cache_dir: PathBuf,
     pub show_download_progress: bool,
+    /// Skip the run entirely when the model is not already cached. Adapters
+    /// use this to keep shutdown-time indexing from downloading anything.
+    pub cached_only: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -40,6 +43,20 @@ impl Store {
     ) -> Result<EmbeddingRunStats> {
         validate_options(&options)?;
         ensure_cache_dir(&options.cache_dir)?;
+
+        if options.cached_only && !model_is_cached(&options.cache_dir) {
+            // Return without claiming: a claimed job holds its lease for the
+            // full lease duration and would block later runs.
+            return Ok(EmbeddingRunStats {
+                model: EMBEDDING_MODEL_ID,
+                cache_dir: options.cache_dir.display().to_string(),
+                claimed: 0,
+                eligible: 0,
+                committed: 0,
+                stale: 0,
+                retried: 0,
+            });
+        }
 
         self.backfill_missing_production_embeddings()?;
 
@@ -254,7 +271,7 @@ const EMBEDDING_MODEL_FILES: [&str; 5] = [
 
 /// Mirrors the fastembed/hf-hub cache layout: one snapshot directory holds all
 /// model files, addressed by refs/<revision>.
-fn model_is_cached(cache_dir: &Path) -> bool {
+pub fn model_is_cached(cache_dir: &Path) -> bool {
     let snapshot = cached_model_snapshot(cache_dir);
     EMBEDDING_MODEL_FILES.iter().all(|file| {
         snapshot
@@ -336,7 +353,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        EMBEDDING_MODEL_FILES, EMBEDDING_MODEL_ID, EMBEDDING_MODEL_REPO, Store, model_is_cached,
+        EMBEDDING_MODEL_FILES, EMBEDDING_MODEL_ID, EMBEDDING_MODEL_REPO, EmbeddingRunOptions,
+        Store, model_is_cached,
     };
     use crate::store::NewMemory;
 
@@ -548,6 +566,42 @@ mod tests {
         );
         assert_eq!(EMBEDDING_MODEL_REPO, repo);
         assert_eq!(EMBEDDING_MODEL_FILES[0], model_file);
+    }
+
+    #[test]
+    fn cached_only_run_skips_without_claiming_when_model_absent() {
+        // Adapter-driven runs must neither download the model nor claim
+        // jobs (a claim holds its lease for the full duration and blocks
+        // later runs) when the model is not already cached.
+        let path = test_path();
+        let mut store = Store::open(&path).expect("open test store");
+        remember(&mut store, "pending semantic memory");
+        assert_eq!(store.index_job_stats().expect("read queue").pending, 1);
+
+        let cache_dir =
+            std::env::temp_dir().join(format!("mem-model-cache-empty-{}", Uuid::now_v7()));
+        std::fs::create_dir_all(&cache_dir).expect("create empty cache dir");
+        assert!(!model_is_cached(&cache_dir));
+
+        let stats = store
+            .run_embedding_jobs(EmbeddingRunOptions {
+                limit: 16,
+                lease_duration: Duration::from_secs(60),
+                retry_delay: Duration::from_secs(60),
+                cache_dir: cache_dir.clone(),
+                show_download_progress: false,
+                cached_only: true,
+            })
+            .expect("run cached-only");
+        assert_eq!(stats.claimed, 0);
+        assert_eq!(stats.committed, 0);
+        let after = store.index_job_stats().expect("read queue after");
+        assert_eq!(after.pending, 1, "job must stay pending, lease untouched");
+        assert_eq!(after.running, 0);
+
+        std::fs::remove_dir_all(&cache_dir).expect("remove cache dir");
+        drop(store);
+        cleanup(&path);
     }
 
     #[test]

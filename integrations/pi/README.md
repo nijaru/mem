@@ -6,6 +6,7 @@ The extension keeps memory semantics in the Rust CLI. Pi is responsible only for
 
 - before an agent turn, call `mem context` and add the result to transient LLM context;
 - after settled turns and around compaction/shutdown, project Pi message/tool evidence into a `mem` episode;
+- at session shutdown, run one bounded, cached-only `mem index run` to catch up on semantic-memory embedding work;
 - keep the original Pi JSONL session authoritative;
 - fail open if `mem` is unavailable.
 
@@ -52,6 +53,10 @@ The script uses a temporary `mem` database and Pi session directory while retain
 - transient `mem-recall` messages are absent from the persisted Pi JSONL.
 
 Set `MEM_PI_SMOKE_KEEP=1` to retain the temporary database and Pi session files for inspection.
+
+## Shutdown indexing
+
+At `session_shutdown` the adapter runs `mem index run -n 16 --lease-seconds 60 --cached-only`. The batch is bounded so shutdown never waits on a large backlog, and `--cached-only` means the run is skipped entirely (no download, no claim) when the embedding model is not already in the local cache. Failures are silent by design: embedding work is derived data, and anything still pending is re-discovered by the next run's backfill.
 
 ## Current boundaries
 

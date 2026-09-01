@@ -179,7 +179,7 @@ Semantic search uses SQLite FTS5 immediately; no external service or model is re
 - `mem context` ranks semantically when the local embedding model is already cached and every active memory visible in the query scope has a current-model vector, and falls back to broader lexical `OR` recall otherwise. `--lexical` forces the lexical baseline.
 - superseded and deleted memories remain in canonical storage but are excluded from active retrieval.
 
-Vector retrieval is derived from the canonical SQLite data and is not required for correctness. Incomplete embedding coverage (for example, a just-remembered memory whose indexing job is still queued) makes `mem context` use lexical recall so no active memory can disappear. `mem context` never downloads the embedding model; run `mem index run` (or an explicit `mem search --semantic`) once to populate the local model cache and vectors. Embedding jobs whose canonical source lost its production-model vector (for example after a model change) are rediscovered by `mem index run`.
+Vector retrieval is derived from the canonical SQLite data and is not required for correctness. Incomplete embedding coverage (for example, a just-remembered memory whose indexing job is still queued) makes `mem context` use lexical recall so no active memory can disappear. `mem context` never downloads the embedding model; run `mem index run` (or an explicit `mem search --semantic`) once to populate the local model cache and vectors. Embedding jobs whose canonical source lost its production-model vector (for example after a model change) are rediscovered by `mem index run`. `mem index run --cached-only` does nothing when the model is not already cached, so adapters can schedule indexing without risking a download.
 
 ## Data location
 

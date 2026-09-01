@@ -411,6 +411,12 @@ struct IndexRun {
     /// Delay before retrying model/inference failures, in seconds.
     #[usage(long)]
     retry_seconds: Option<u64>,
+
+    /// Do nothing when the embedding model is not already cached locally.
+    /// Keeps adapter-driven runs (for example at session shutdown) from
+    /// downloading the model.
+    #[usage(long)]
+    cached_only: bool,
 }
 
 /// Claim pending or expired derived-index work.
@@ -917,6 +923,7 @@ fn run(cli: MemCli) -> Result<()> {
                     ),
                     cache_dir: model_cache_dir()?,
                     show_download_progress: !cli.json,
+                    cached_only: command.cached_only,
                 })?;
                 if cli.json {
                     print_json(&stats)?;
