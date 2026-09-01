@@ -3,6 +3,7 @@ mod embedding_worker;
 mod episode;
 mod index_job;
 mod project;
+mod storage;
 mod store;
 mod vector_search;
 

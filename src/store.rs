@@ -120,16 +120,34 @@ impl Store {
         }
 
         let connection = Connection::open(path)?;
+        let store = Self::connect(connection)?;
+        store.migrate()?;
+        Ok(store)
+    }
+
+    /// Open a store that must already exist. Read-only invocations use this
+    /// so visiting a project never creates an empty database. Routed
+    /// operations (Slice B) are the product consumers; tests cover it until
+    /// then.
+    #[allow(dead_code)]
+    pub fn open_existing(path: &Path) -> Result<Option<Self>> {
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let connection = Connection::open(path)?;
+        let store = Self::connect(connection)?;
+        store.migrate()?;
+        Ok(Some(store))
+    }
+
+    fn connect(connection: Connection) -> Result<Self> {
         connection.busy_timeout(Duration::from_secs(5))?;
         connection.execute_batch(
             "PRAGMA journal_mode=WAL;\n\
              PRAGMA foreign_keys=ON;\n\
              PRAGMA synchronous=NORMAL;",
         )?;
-
-        let store = Self { connection };
-        store.migrate()?;
-        Ok(store)
+        Ok(Self { connection })
     }
 
     pub fn stats(&self) -> Result<StoreStats> {
@@ -746,6 +764,39 @@ mod tests {
             .expect("broad recall");
         assert_eq!(recalled.len(), 2);
 
+        cleanup(&path);
+    }
+
+    #[test]
+    fn open_existing_never_creates_a_database() {
+        let path = test_path();
+        assert!(
+            Store::open_existing(&path)
+                .expect("probe absent store")
+                .is_none(),
+            "absent path must not be created"
+        );
+        assert!(!path.exists());
+
+        let mut store = Store::open(&path).expect("create store");
+        store
+            .remember(NewMemory {
+                text: "existing memory".to_owned(),
+                kind: "fact".to_owned(),
+                project_id: None,
+                actor: "agent".to_owned(),
+                source_type: "test".to_owned(),
+                source_ref: None,
+            })
+            .expect("store memory");
+        drop(store);
+
+        let reopened = Store::open_existing(&path)
+            .expect("probe existing store")
+            .expect("existing file opens");
+        assert_eq!(reopened.stats().expect("read stats").schema_version, 5);
+
+        drop(reopened);
         cleanup(&path);
     }
 
