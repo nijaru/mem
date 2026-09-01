@@ -487,7 +487,54 @@ mod tests {
         let record = store.get_episode(&episode.id).expect("read episode");
         assert_eq!(record.entries.len(), 1);
         assert_eq!(record.entries[0].source_ref, "entry-7");
-        assert_eq!(store.stats().expect("read stats").schema_version, 4);
+        assert_eq!(store.stats().expect("read stats").schema_version, 5);
+
+        drop(store);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn recording_entries_never_queues_embedding_work() {
+        // Episodic history is lexical-only in v0.x; no trigger or reader
+        // maintains episode-entry vectors, so recording entries must leave
+        // the embedding queue untouched.
+        let path = test_path();
+        let store = Store::open(&path).expect("open test store");
+        let episode = store
+            .ensure_episode(NewEpisode {
+                project_id: None,
+                workspace_id: None,
+                source_type: "pi-session".to_owned(),
+                source_ref: "session-1".to_owned(),
+                started_at: Some(10),
+                metadata_json: None,
+            })
+            .expect("create episode");
+        store
+            .record_episode_entry(
+                &episode.id,
+                NewEpisodeEntry {
+                    source_ref: "message-1".to_owned(),
+                    ordinal: Some(0),
+                    kind: "message".to_owned(),
+                    role: None,
+                    text: "recorded without embedding work".to_owned(),
+                    occurred_at: Some(20),
+                    metadata_json: None,
+                },
+            )
+            .expect("record entry");
+        let stats = store.index_job_stats().expect("read job stats");
+        assert_eq!(stats.pending + stats.running, 0);
+        let episode_vectors: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM embeddings WHERE entity_type = 'episode_entry'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count episode vectors");
+        assert_eq!(episode_vectors, 0);
 
         drop(store);
         cleanup(&path);
@@ -503,7 +550,7 @@ mod tests {
         drop(connection);
 
         let store = Store::open(&path).expect("migrate v1 database");
-        assert_eq!(store.stats().expect("read stats").schema_version, 4);
+        assert_eq!(store.stats().expect("read stats").schema_version, 5);
         drop(store);
         cleanup(&path);
     }

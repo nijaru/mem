@@ -154,7 +154,6 @@ mod tests {
     use uuid::Uuid;
 
     use super::{EMBEDDING_MODEL_ID, Store};
-    use crate::episode::{NewEpisode, NewEpisodeEntry};
     use crate::store::NewMemory;
     use rusqlite::params;
 
@@ -243,53 +242,36 @@ mod tests {
     }
 
     #[test]
-    fn stale_episode_claim_cannot_write_after_source_refresh() {
+    fn stale_claim_cannot_write_after_source_refresh() {
         let path = test_path();
         let mut store = Store::open(&path).expect("open test store");
-        let episode = store
-            .ensure_episode(NewEpisode {
+        let memory = store
+            .remember(NewMemory {
+                text: "first source text".to_owned(),
+                kind: "fact".to_owned(),
                 project_id: None,
-                workspace_id: None,
-                source_type: "pi-session".to_owned(),
-                source_ref: "session-1".to_owned(),
-                started_at: Some(10),
-                metadata_json: None,
+                actor: "agent".to_owned(),
+                source_type: "test".to_owned(),
+                source_ref: None,
             })
-            .expect("create episode");
-        let entry = store
-            .record_episode_entry(
-                &episode.id,
-                NewEpisodeEntry {
-                    source_ref: "message-1".to_owned(),
-                    ordinal: Some(0),
-                    kind: "message".to_owned(),
-                    role: Some("assistant".to_owned()),
-                    text: "first source text".to_owned(),
-                    occurred_at: Some(20),
-                    metadata_json: None,
-                },
-            )
-            .expect("record entry");
+            .expect("store memory");
         let stale = store
             .claim_index_jobs("worker-a", 1, Duration::from_secs(30))
             .expect("claim first generation")
             .pop()
             .expect("claimed job");
 
+        // Memories have no in-place text update API (correction supersedes
+        // instead), so refresh the canonical text directly — the path the
+        // memories_index_job_active_update trigger guards.
         store
-            .record_episode_entry(
-                &episode.id,
-                NewEpisodeEntry {
-                    source_ref: "message-1".to_owned(),
-                    ordinal: Some(0),
-                    kind: "message".to_owned(),
-                    role: Some("assistant".to_owned()),
-                    text: "refreshed source text".to_owned(),
-                    occurred_at: Some(30),
-                    metadata_json: None,
-                },
+            .connection
+            .execute(
+                "UPDATE memories\n\
+                 SET text = 'refreshed source text', updated_at = updated_at + 1 WHERE id = ?1",
+                params![&memory.id],
             )
-            .expect("refresh entry");
+            .expect("refresh canonical text");
 
         assert!(
             !store
@@ -306,7 +288,7 @@ mod tests {
             .connection
             .query_row(
                 "SELECT COUNT(*) FROM embeddings WHERE entity_id = ?1",
-                [&entry.id],
+                [&memory.id],
                 |row| row.get(0),
             )
             .expect("count embeddings");
@@ -316,7 +298,7 @@ mod tests {
             .expect("claim refreshed work")
             .pop()
             .expect("refreshed job");
-        assert_eq!(queued.entity_id, entry.id);
+        assert_eq!(queued.entity_id, memory.id);
         assert_ne!(queued.lease_token, stale.lease_token);
 
         drop(store);
@@ -327,30 +309,16 @@ mod tests {
     fn source_refresh_invalidates_a_previously_committed_vector() {
         let path = test_path();
         let mut store = Store::open(&path).expect("open test store");
-        let episode = store
-            .ensure_episode(NewEpisode {
+        let memory = store
+            .remember(NewMemory {
+                text: "before refresh".to_owned(),
+                kind: "fact".to_owned(),
                 project_id: None,
-                workspace_id: None,
-                source_type: "pi-session".to_owned(),
-                source_ref: "session-1".to_owned(),
-                started_at: Some(10),
-                metadata_json: None,
+                actor: "agent".to_owned(),
+                source_type: "test".to_owned(),
+                source_ref: None,
             })
-            .expect("create episode");
-        let entry = store
-            .record_episode_entry(
-                &episode.id,
-                NewEpisodeEntry {
-                    source_ref: "message-1".to_owned(),
-                    ordinal: Some(0),
-                    kind: "message".to_owned(),
-                    role: None,
-                    text: "before refresh".to_owned(),
-                    occurred_at: Some(20),
-                    metadata_json: None,
-                },
-            )
-            .expect("record entry");
+            .expect("store memory");
         let job = store
             .claim_index_jobs("worker-a", 1, Duration::from_secs(30))
             .expect("claim work")
@@ -368,25 +336,21 @@ mod tests {
                 .expect("commit vector")
         );
 
+        // Direct canonical text refresh — the path the
+        // memories_embedding_invalidate_active_update trigger guards.
         store
-            .record_episode_entry(
-                &episode.id,
-                NewEpisodeEntry {
-                    source_ref: "message-1".to_owned(),
-                    ordinal: Some(0),
-                    kind: "message".to_owned(),
-                    role: None,
-                    text: "after refresh".to_owned(),
-                    occurred_at: Some(30),
-                    metadata_json: None,
-                },
+            .connection
+            .execute(
+                "UPDATE memories\n\
+                 SET text = 'after refresh', updated_at = updated_at + 1 WHERE id = ?1",
+                params![&memory.id],
             )
             .expect("refresh source");
         let embedding_count: i64 = store
             .connection
             .query_row(
                 "SELECT COUNT(*) FROM embeddings WHERE entity_id = ?1",
-                [&entry.id],
+                [&memory.id],
                 |row| row.get(0),
             )
             .expect("count invalidated vectors");

@@ -238,7 +238,6 @@ mod tests {
 
     use super::Store;
     use crate::embedding_worker::EMBEDDING_MODEL_ID;
-    use crate::episode::{NewEpisode, NewEpisodeEntry};
     use crate::store::NewMemory;
 
     #[test]
@@ -294,30 +293,16 @@ mod tests {
     fn requeue_fences_a_stale_worker_generation() {
         let path = test_path();
         let mut store = Store::open(&path).expect("open test store");
-        let episode = store
-            .ensure_episode(NewEpisode {
+        let memory = store
+            .remember(NewMemory {
+                text: "first indexed text".to_owned(),
+                kind: "fact".to_owned(),
                 project_id: Some("github.com/nijaru/mem".to_owned()),
-                workspace_id: Some("branch:main".to_owned()),
-                source_type: "pi-session".to_owned(),
-                source_ref: "session-1".to_owned(),
-                started_at: Some(10),
-                metadata_json: None,
+                actor: "agent".to_owned(),
+                source_type: "test".to_owned(),
+                source_ref: None,
             })
-            .expect("create episode");
-        store
-            .record_episode_entry(
-                &episode.id,
-                NewEpisodeEntry {
-                    source_ref: "message-1".to_owned(),
-                    ordinal: Some(0),
-                    kind: "message".to_owned(),
-                    role: Some("assistant".to_owned()),
-                    text: "first indexed text".to_owned(),
-                    occurred_at: Some(20),
-                    metadata_json: None,
-                },
-            )
-            .expect("record entry");
+            .expect("store memory");
 
         let first = store
             .claim_index_jobs("worker-a", 1, Duration::from_secs(30))
@@ -326,20 +311,17 @@ mod tests {
             .expect("first job");
         assert_eq!(first.generation, 1);
 
+        // Memories have no in-place text update API (correction supersedes
+        // instead), so refresh the canonical text directly — the path the
+        // memories_index_job_active_update trigger guards.
         store
-            .record_episode_entry(
-                &episode.id,
-                NewEpisodeEntry {
-                    source_ref: "message-1".to_owned(),
-                    ordinal: Some(0),
-                    kind: "message".to_owned(),
-                    role: Some("assistant".to_owned()),
-                    text: "updated indexed text".to_owned(),
-                    occurred_at: Some(30),
-                    metadata_json: None,
-                },
+            .connection
+            .execute(
+                "UPDATE memories\n\
+                 SET text = 'updated indexed text', updated_at = updated_at + 1 WHERE id = ?1",
+                params![&memory.id],
             )
-            .expect("refresh entry");
+            .expect("refresh canonical text");
 
         assert!(
             !store
@@ -418,7 +400,88 @@ mod tests {
     }
 
     #[test]
-    fn v2_migration_backfills_existing_derived_work() {
+    fn v4_migration_drains_running_episode_jobs_and_vectors() {
+        // A v4 database can hold a *running* episode embedding job and
+        // existing episode vectors. The old delete-guard would block the
+        // drain of a running episode job; v5 must replace the guard first and
+        // then remove all episode work and derived vectors.
+        let path = test_path();
+        let connection = Connection::open(&path).expect("open v4 database");
+        connection
+            .execute_batch(include_str!("../migrations/0001_initial.sql"))
+            .expect("create v1 schema");
+        connection
+            .execute_batch(include_str!("../migrations/0002_episode_entries.sql"))
+            .expect("create v2 schema");
+        connection
+            .execute_batch(include_str!("../migrations/0003_index_jobs.sql"))
+            .expect("create v3 schema");
+        connection
+            .execute_batch(include_str!("../migrations/0004_embeddings.sql"))
+            .expect("create v4 schema");
+        connection
+            .execute(
+                "INSERT INTO episodes (\n\
+                     id, project_id, source_type, source_ref, started_at, ended_at, summary,\n\
+                     metadata_json, workspace_id\n\
+                 ) VALUES ('episode-1', NULL, 'pi-session', 'session-1', 20, NULL, NULL, NULL, NULL)",
+                [],
+            )
+            .expect("insert existing episode");
+        connection
+            .execute(
+                "INSERT INTO episode_entries (\n\
+                     id, episode_id, source_ref, ordinal, kind, role, text, occurred_at, metadata_json\n\
+                 ) VALUES ('entry-1', 'episode-1', 'message-1', 0, 'message', 'assistant',\n\
+                           'existing entry', 30, NULL)",
+                [],
+            )
+            .expect("insert existing entry");
+        // v3/v4 triggers enqueue the entry job; flip it to running with a
+        // lease as a live worker would have, and give it a committed vector.
+        connection
+            .execute(
+                "UPDATE index_jobs\n\
+                 SET state = 'running', lease_owner = 'worker-a', lease_token = 'token',\n\
+                     lease_until = 99000, attempts = 1\n\
+                 WHERE entity_type = 'episode_entry'",
+                [],
+            )
+            .expect("mark episode job running");
+        connection
+            .execute(
+                "INSERT INTO embeddings (\n\
+                     entity_type, entity_id, model, dimensions, vector, source_generation, updated_at\n\
+                 ) VALUES ('episode_entry', 'entry-1', ?1, 2, X'0000803F00000000', 1, 0)",
+                params![EMBEDDING_MODEL_ID],
+            )
+            .expect("insert episode vector");
+        drop(connection);
+
+        let store = Store::open(&path).expect("migrate v4 database");
+        assert_eq!(store.stats().expect("read store stats").schema_version, 5);
+        let stats = store.index_job_stats().expect("read job stats");
+        assert_eq!(stats.pending, 0);
+        assert_eq!(stats.running, 0);
+        let episode_vectors: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM embeddings WHERE entity_type = 'episode_entry'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count episode vectors");
+        assert_eq!(
+            episode_vectors, 0,
+            "running episode work and vectors are drained"
+        );
+
+        drop(store);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn v2_migration_backfills_memory_work_and_drains_episode_vectors() {
         let path = test_path();
         let connection = Connection::open(&path).expect("open v2 database");
         connection
@@ -457,19 +520,22 @@ mod tests {
         drop(connection);
 
         let store = Store::open(&path).expect("migrate v2 database");
-        assert_eq!(store.stats().expect("read store stats").schema_version, 4);
+        assert_eq!(store.stats().expect("read stats").schema_version, 5);
+        // The v3 migration enqueues embedding work for both the memory and
+        // the episode entry; v4 would keep both; v5 drains the episode entry
+        // because no reader consumes episode-entry vectors.
         let stats = store.index_job_stats().expect("read job stats");
-        assert_eq!(stats.pending, 2);
+        assert_eq!(stats.pending, 1);
         assert_eq!(stats.running, 0);
-        let count: i64 = store
+        let episode_jobs: i64 = store
             .connection
             .query_row(
-                "SELECT COUNT(*) FROM index_jobs WHERE generation = 1 AND state = 'pending'",
+                "SELECT COUNT(*) FROM index_jobs WHERE entity_type = 'episode_entry'",
                 [],
                 |row| row.get(0),
             )
-            .expect("count backfilled jobs");
-        assert_eq!(count, 2);
+            .expect("count episode jobs");
+        assert_eq!(episode_jobs, 0, "episode embedding work is drained");
 
         drop(store);
         cleanup(&path);

@@ -180,14 +180,6 @@ impl Store {
                     |row| row.get(0),
                 )
                 .optional()?),
-            "episode_entry" => Ok(self
-                .connection
-                .query_row(
-                    "SELECT text FROM episode_entries WHERE id = ?1",
-                    [&job.entity_id],
-                    |row| row.get(0),
-                )
-                .optional()?),
             entity_type => bail!("unsupported embedding entity type: {entity_type}"),
         }
     }
@@ -346,7 +338,6 @@ mod tests {
     use super::{
         EMBEDDING_MODEL_FILES, EMBEDDING_MODEL_ID, EMBEDDING_MODEL_REPO, Store, model_is_cached,
     };
-    use crate::episode::{NewEpisode, NewEpisodeEntry};
     use crate::store::NewMemory;
 
     #[test]
@@ -359,39 +350,14 @@ mod tests {
         let mut store = Store::open(&path).expect("open test store");
         let covered = remember(&mut store, "already covered by production model");
         let legacy = remember(&mut store, "historically embedded under an old model");
-        let episode = store
-            .ensure_episode(NewEpisode {
-                project_id: None,
-                workspace_id: None,
-                source_type: "test-session".to_owned(),
-                source_ref: "session-1".to_owned(),
-                started_at: Some(10),
-                metadata_json: None,
-            })
-            .expect("create episode");
-        store
-            .record_episode_entry(
-                &episode.id,
-                NewEpisodeEntry {
-                    source_ref: "message-1".to_owned(),
-                    ordinal: Some(0),
-                    kind: "message".to_owned(),
-                    role: None,
-                    text: "episode entry text".to_owned(),
-                    occurred_at: Some(20),
-                    metadata_json: None,
-                },
-            )
-            .expect("record entry");
 
-        // Simulate the historical wrong-model consumption: claim all three
-        // jobs and consume them as a pre-guard database would — `covered` got
-        // a production-model vector, `legacy` only an old-model one, and the
-        // episode entry nothing.
+        // Simulate the historical wrong-model consumption: claim both jobs
+        // and consume them as a pre-guard database would — `covered` got a
+        // production-model vector, `legacy` only an old-model one.
         let claimed = store
             .claim_index_jobs("worker-a", 10, Duration::from_secs(30))
             .expect("claim all jobs");
-        assert_eq!(claimed.len(), 3);
+        assert_eq!(claimed.len(), 2);
         for job in &claimed {
             if job.entity_id == covered.id {
                 store
@@ -406,8 +372,6 @@ mod tests {
                     )
                     .expect("insert production vector for covered");
             } else {
-                // Pre-guard databases embedded episode entries too; give this
-                // job the same-generation vector the trigger requires.
                 store
                     .connection
                     .execute(
@@ -450,11 +414,6 @@ mod tests {
             vec![legacy_id.clone()],
             "only the uncovered memory is requeued"
         );
-
-        // The episode entry is also uncovered by the production model, but
-        // episode-entry vectors have no reader yet (Step 3 disables them), so
-        // backfill deliberately requeues memories only.
-        assert!(pending.iter().all(|id| id != "episode entry"));
 
         // Claiming the backfilled job and committing a production-model
         // vector completes the recovery.
@@ -523,30 +482,26 @@ mod tests {
                 source_ref: None,
             })
             .expect("store memory");
-        let episode = store
-            .ensure_episode(NewEpisode {
+        let second = store
+            .remember(NewMemory {
+                text: "current second text".to_owned(),
+                kind: "fact".to_owned(),
                 project_id: None,
-                workspace_id: None,
-                source_type: "test-session".to_owned(),
-                source_ref: "session-1".to_owned(),
-                started_at: Some(10),
-                metadata_json: None,
+                actor: "agent".to_owned(),
+                source_type: "test".to_owned(),
+                source_ref: None,
             })
-            .expect("create episode");
-        let entry = store
-            .record_episode_entry(
-                &episode.id,
-                NewEpisodeEntry {
-                    source_ref: "message-1".to_owned(),
-                    ordinal: Some(0),
-                    kind: "message".to_owned(),
-                    role: None,
-                    text: "current episode text".to_owned(),
-                    occurred_at: Some(20),
-                    metadata_json: None,
-                },
+            .expect("store second memory");
+        // Direct canonical text refresh so claimed jobs must resolve only the
+        // current text — the path the source-resolution guards.
+        store
+            .connection
+            .execute(
+                "UPDATE memories\n\
+                 SET text = 'refreshed second text', updated_at = updated_at + 1 WHERE id = ?1",
+                rusqlite::params![&second.id],
             )
-            .expect("record episode entry");
+            .expect("refresh canonical text");
 
         let jobs = store
             .claim_index_jobs("worker-a", 2, Duration::from_secs(30))
@@ -560,8 +515,8 @@ mod tests {
             if job.entity_id == memory.id {
                 assert_eq!(text, "current semantic text");
             } else {
-                assert_eq!(job.entity_id, entry.id);
-                assert_eq!(text, "current episode text");
+                assert_eq!(job.entity_id, second.id);
+                assert_eq!(text, "refreshed second text");
             }
         }
 

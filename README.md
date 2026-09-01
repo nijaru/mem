@@ -152,6 +152,8 @@ mem history "publication handoff"
 
 History hits retain both the episode-level source reference and the exact source-local entry reference so integrations can expand a result back into the original evidence.
 
+History search is lexical (FTS5) only. Episode entries are never embedded: no reader consumes episode-entry vectors yet, so maintaining them would spend model time and database space on derived data with no consumer. Embedding work covers semantic memories only.
+
 ## Project and workspace identity
 
 When run inside Git, `mem` derives the project identity from the canonicalized `origin` remote where possible. Common SSH and HTTPS forms normalize to identities such as:
@@ -177,7 +179,7 @@ Semantic search uses SQLite FTS5 immediately; no external service or model is re
 - `mem context` ranks semantically when the local embedding model is already cached and every active memory visible in the query scope has a current-model vector, and falls back to broader lexical `OR` recall otherwise. `--lexical` forces the lexical baseline.
 - superseded and deleted memories remain in canonical storage but are excluded from active retrieval.
 
-Vector retrieval is derived from the canonical SQLite data and is not required for correctness. Incomplete embedding coverage (for example, a just-remembered memory whose indexing job is still queued) makes `mem context` use lexical recall so no active memory can disappear. `mem context` never downloads the embedding model; run `mem index run` (or an explicit `mem search --semantic`) once to populate the local model cache and vectors.
+Vector retrieval is derived from the canonical SQLite data and is not required for correctness. Incomplete embedding coverage (for example, a just-remembered memory whose indexing job is still queued) makes `mem context` use lexical recall so no active memory can disappear. `mem context` never downloads the embedding model; run `mem index run` (or an explicit `mem search --semantic`) once to populate the local model cache and vectors. Embedding jobs whose canonical source lost its production-model vector (for example after a model change) are rediscovered by `mem index run`.
 
 ## Data location
 
