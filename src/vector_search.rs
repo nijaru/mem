@@ -6,7 +6,7 @@ use serde::Serialize;
 
 use crate::store::{Memory, Store};
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SemanticSearchHit {
     pub memory: Memory,
     pub score: f64,

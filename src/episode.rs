@@ -58,7 +58,7 @@ pub struct EpisodeRecord {
     pub entries: Vec<EpisodeEntry>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct HistoryHit {
     pub episode_id: String,
     pub project_id: Option<String>,
@@ -295,11 +295,45 @@ impl Store {
         )?)
     }
 
+    /// Candidate episode IDs matching an exact ID or prefix. Used by routed
+    /// resolution, which must see every store's matches to enforce
+    /// cross-store uniqueness.
+    pub fn episode_id_candidates(&self, id_or_prefix: &str) -> Result<Vec<String>> {
+        let candidate = id_or_prefix.trim();
+        let prefix = format!("{candidate}%");
+        let mut statement = self.connection.prepare(
+            "SELECT id\n\
+             FROM episodes\n\
+             WHERE id = ?1 OR id LIKE ?2\n\
+             ORDER BY CASE WHEN id = ?1 THEN 0 ELSE 1 END, id\n\
+             LIMIT 3",
+        )?;
+        let rows =
+            statement.query_map(params![candidate, prefix], |row| row.get::<_, String>(0))?;
+        let ids = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(ids)
+    }
+
     fn resolve_episode_id(&self, id_or_prefix: &str) -> Result<String> {
         let candidate = id_or_prefix.trim();
         if candidate.is_empty() {
             bail!("episode ID cannot be empty");
         }
+
+        // An exact ID always resolves, even when it is also a prefix of other
+        // IDs; only genuine prefix lookups can be ambiguous.
+        if let Some(id) = self
+            .connection
+            .query_row(
+                "SELECT id FROM episodes WHERE id = ?1",
+                [candidate],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        {
+            return Ok(id);
+        }
+
         let prefix = format!("{candidate}%");
         let mut statement = self.connection.prepare(
             "SELECT id\n\

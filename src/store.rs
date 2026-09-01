@@ -10,6 +10,7 @@ use uuid::Uuid;
 const SCHEMA_VERSION: i64 = 5;
 const MEMORY_KINDS: &[&str] = &["fact", "decision", "constraint", "preference", "procedure"];
 
+#[derive(Debug)]
 pub struct Store {
     pub(crate) connection: Connection,
 }
@@ -40,7 +41,7 @@ pub struct NewWorkspaceState {
     pub checkpoint: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Memory {
     pub id: String,
     pub scope: String,
@@ -54,7 +55,7 @@ pub struct Memory {
     pub deleted_at: Option<i64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct MemorySource {
     pub id: String,
     pub source_type: String,
@@ -63,7 +64,7 @@ pub struct MemorySource {
     pub created_at: i64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct MemoryRelation {
     pub from_memory_id: String,
     pub to_memory_id: String,
@@ -71,7 +72,7 @@ pub struct MemoryRelation {
     pub created_at: i64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct MemoryRecord {
     pub memory: Memory,
     pub sources: Vec<MemorySource>,
@@ -84,7 +85,7 @@ pub struct CorrectionResult {
     pub replacement: MemoryRecord,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SearchHit {
     pub memory: Memory,
     pub rank: f64,
@@ -110,6 +111,11 @@ pub struct StoreStats {
 }
 
 impl Store {
+    /// The database file path backing this store, if known.
+    pub fn path(&self) -> Option<&str> {
+        self.connection.path()
+    }
+
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path
             .parent()
@@ -126,10 +132,7 @@ impl Store {
     }
 
     /// Open a store that must already exist. Read-only invocations use this
-    /// so visiting a project never creates an empty database. Routed
-    /// operations (Slice B) are the product consumers; tests cover it until
-    /// then.
-    #[allow(dead_code)]
+    /// so visiting a project never creates an empty database.
     pub fn open_existing(path: &Path) -> Result<Option<Self>> {
         if !path.is_file() {
             return Ok(None);
@@ -503,10 +506,43 @@ impl Store {
         )?)
     }
 
+    /// Candidate IDs matching an exact ID or prefix. Used by routed
+    /// resolution, which must see every store's matches to enforce
+    /// cross-store uniqueness.
+    pub fn memory_id_candidates(&self, id_or_prefix: &str) -> Result<Vec<String>> {
+        let candidate = id_or_prefix.trim();
+        let prefix = format!("{candidate}%");
+        let mut statement = self.connection.prepare(
+            "SELECT id\n\
+             FROM memories\n\
+             WHERE id = ?1 OR id LIKE ?2\n\
+             ORDER BY CASE WHEN id = ?1 THEN 0 ELSE 1 END, id\n\
+             LIMIT 3",
+        )?;
+        let rows =
+            statement.query_map(params![candidate, prefix], |row| row.get::<_, String>(0))?;
+        let ids = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(ids)
+    }
+
     fn resolve_id(&self, id_or_prefix: &str) -> Result<String> {
         let candidate = id_or_prefix.trim();
         if candidate.is_empty() {
             bail!("memory ID cannot be empty");
+        }
+
+        // An exact ID always resolves, even when it is also a prefix of other
+        // IDs; only genuine prefix lookups can be ambiguous.
+        if let Some(id) = self
+            .connection
+            .query_row(
+                "SELECT id FROM memories WHERE id = ?1",
+                [candidate],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        {
+            return Ok(id);
         }
 
         let prefix = format!("{candidate}%");

@@ -21,6 +21,7 @@ use crate::embedding_worker::{
 };
 use crate::episode::{NewEpisode, NewEpisodeEntry};
 use crate::project::ProjectContext;
+use crate::storage::StorageRouter;
 use crate::store::{
     Memory, MemorySource, NewCorrection, NewMemory, NewWorkspaceState, SearchHit, Store,
     WorkspaceState,
@@ -562,11 +563,13 @@ fn parse_cli(argv: &[String]) -> Option<MemCli> {
 
 fn run(cli: MemCli) -> Result<()> {
     let db_path = database_path(cli.db.as_deref())?;
-    let mut store = Store::open(&db_path)
-        .with_context(|| format!("open memory database at {}", db_path.display()))?;
+    // Slice E flips the no-override default to the managed layout; until
+    // then every invocation is exact-file and routing is a pass-through.
+    let router = StorageRouter::exact(db_path.clone());
 
     match cli.command {
         Command::Init(_) | Command::Status(_) => {
+            let store = router.write_store(None)?;
             let stats = store.stats()?;
             let output = StatusOutput {
                 database: db_path.display().to_string(),
@@ -607,7 +610,11 @@ fn run(cli: MemCli) -> Result<()> {
             StateCommand::Show(command) => {
                 let context =
                     project_context(command.project.as_deref(), command.workspace.as_deref())?;
-                let state = store.workspace_state(&context.project_id, &context.workspace_id)?;
+                let state = crate::storage::routed_workspace_state(
+                    &router,
+                    &context.project_id,
+                    &context.workspace_id,
+                )?;
                 if cli.json {
                     print_json(&state)?;
                 } else if let Some(state) = state {
@@ -622,6 +629,7 @@ fn run(cli: MemCli) -> Result<()> {
             StateCommand::Set(command) => {
                 let context =
                     project_context(command.project.as_deref(), command.workspace.as_deref())?;
+                let store = router.write_store(Some(&context.project_id))?;
                 let state = store.set_workspace_state(NewWorkspaceState {
                     project_id: context.project_id,
                     workspace_id: context.workspace_id,
@@ -639,6 +647,7 @@ fn run(cli: MemCli) -> Result<()> {
             StateCommand::Clear(command) => {
                 let context =
                     project_context(command.project.as_deref(), command.workspace.as_deref())?;
+                let store = router.write_store(Some(&context.project_id))?;
                 let cleared =
                     store.clear_workspace_state(&context.project_id, &context.workspace_id)?;
                 if cli.json {
@@ -664,16 +673,28 @@ fn run(cli: MemCli) -> Result<()> {
             let project =
                 optional_project_context(command.project.as_deref(), command.workspace.as_deref())?;
             let state = if let Some(project) = project.as_ref() {
-                store.workspace_state(&project.project_id, &project.workspace_id)?
+                crate::storage::routed_workspace_state(
+                    &router,
+                    &project.project_id,
+                    &project.workspace_id,
+                )?
             } else {
                 None
             };
             let project_id = project.as_ref().map(|project| project.project_id.as_str());
             let limit = command.limit.unwrap_or(10).clamp(1, 100);
-            let hits = recall_hits(&store, &command.query, project_id, limit, command.lexical)?;
+            let hits = crate::storage::routed_recall_hits(
+                &router,
+                project_id,
+                &command.query,
+                limit,
+                command.lexical,
+            )?;
             let mut memories = Vec::with_capacity(hits.len());
             for hit in hits {
-                let record = store.get(&hit.memory.id)?;
+                let (store, id) =
+                    crate::storage::routed_resolve_memory(&router, project_id, &hit.memory.id)?;
+                let record = store.get(&id)?;
                 memories.push(ContextMemory {
                     memory: record.memory,
                     sources: record.sources,
@@ -692,6 +713,7 @@ fn run(cli: MemCli) -> Result<()> {
         }
         Command::Remember(command) => {
             let project_id = memory_project(command.project.as_deref(), command.global_memory)?;
+            let mut store = router.write_store(project_id.as_deref())?;
             let memory = store.remember(NewMemory {
                 text: command.text,
                 kind: command.kind.unwrap_or_else(|| "fact".to_owned()),
@@ -707,8 +729,10 @@ fn run(cli: MemCli) -> Result<()> {
             }
         }
         Command::Correct(command) => {
+            let (mut store, id) =
+                crate::storage::routed_resolve_memory(&router, None, &command.id)?;
             let result = store.correct(
-                &command.id,
+                &id,
                 NewCorrection {
                     text: command.text,
                     kind: command.kind,
@@ -738,10 +762,10 @@ fn run(cli: MemCli) -> Result<()> {
             if command.semantic {
                 let cache_dir = model_cache_dir()?;
                 let query_vector = embed_query(&command.query, &cache_dir, !cli.json)?;
-                let hits = store.semantic_search_by_vector(
-                    &query_vector,
-                    EMBEDDING_MODEL_ID,
+                let hits = crate::storage::routed_semantic_search(
+                    &router,
                     project_id.as_deref(),
+                    &query_vector,
                     limit,
                 )?;
                 if cli.json {
@@ -760,7 +784,12 @@ fn run(cli: MemCli) -> Result<()> {
                     }
                 }
             } else {
-                let hits = store.search(&command.query, project_id.as_deref(), limit)?;
+                let hits = crate::storage::routed_lexical_search(
+                    &router,
+                    project_id.as_deref(),
+                    &command.query,
+                    limit,
+                )?;
                 if cli.json {
                     print_json(&hits)?;
                 } else {
@@ -779,7 +808,8 @@ fn run(cli: MemCli) -> Result<()> {
             }
         }
         Command::Get(command) => {
-            let record = store.get(&command.id)?;
+            let (store, id) = crate::storage::routed_resolve_memory(&router, None, &command.id)?;
+            let record = store.get(&id)?;
             if cli.json {
                 print_json(&record)?;
             } else {
@@ -805,7 +835,8 @@ fn run(cli: MemCli) -> Result<()> {
             }
         }
         Command::Forget(command) => {
-            let id = store.forget(&command.id)?;
+            let (store, id) = crate::storage::routed_resolve_memory(&router, None, &command.id)?;
+            let id = store.forget(&id)?;
             if cli.json {
                 print_json(&serde_json::json!({ "id": id, "status": "deleted" }))?;
             } else {
@@ -819,6 +850,8 @@ fn run(cli: MemCli) -> Result<()> {
                     command.workspace.as_deref(),
                     command.global_episode,
                 )?;
+                let store =
+                    router.write_store(context.as_ref().map(|value| value.project_id.as_str()))?;
                 let episode = store.ensure_episode(NewEpisode {
                     project_id: context.as_ref().map(|value| value.project_id.clone()),
                     workspace_id: context.as_ref().map(|value| value.workspace_id.clone()),
@@ -837,8 +870,10 @@ fn run(cli: MemCli) -> Result<()> {
                 }
             }
             EpisodeSubcommand::Record(command) => {
+                let (store, episode_id) =
+                    crate::storage::routed_resolve_episode(&router, None, &command.episode)?;
                 let entry = store.record_episode_entry(
-                    &command.episode,
+                    &episode_id,
                     NewEpisodeEntry {
                         source_ref: command.source_ref,
                         ordinal: command.ordinal,
@@ -859,7 +894,9 @@ fn run(cli: MemCli) -> Result<()> {
                 }
             }
             EpisodeSubcommand::End(command) => {
-                let episode = store.end_episode(&command.episode, command.ended_at)?;
+                let (store, episode_id) =
+                    crate::storage::routed_resolve_episode(&router, None, &command.episode)?;
+                let episode = store.end_episode(&episode_id, command.ended_at)?;
                 if cli.json {
                     print_json(&episode)?;
                 } else {
@@ -871,7 +908,9 @@ fn run(cli: MemCli) -> Result<()> {
                 }
             }
             EpisodeSubcommand::Get(command) => {
-                let record = store.get_episode(&command.episode)?;
+                let (store, episode_id) =
+                    crate::storage::routed_resolve_episode(&router, None, &command.episode)?;
+                let record = store.get_episode(&episode_id)?;
                 if cli.json {
                     print_json(&record)?;
                 } else {
@@ -881,9 +920,10 @@ fn run(cli: MemCli) -> Result<()> {
         },
         Command::History(command) => {
             let project_id = memory_project(command.project.as_deref(), command.global_history)?;
-            let hits = store.history_search(
-                &command.query,
+            let hits = crate::storage::routed_history_search(
+                &router,
                 project_id.as_deref(),
+                &command.query,
                 command.limit.unwrap_or(10).clamp(1, 100),
             )?;
             if cli.json {
@@ -903,141 +943,144 @@ fn run(cli: MemCli) -> Result<()> {
                 }
             }
         }
-        Command::Index(command) => match command.command {
-            IndexSubcommand::Status(_) => {
-                let stats = store.index_job_stats()?;
-                if cli.json {
-                    print_json(&stats)?;
-                } else {
-                    println!("pending: {}", stats.pending);
-                    println!("running: {}", stats.running);
+        Command::Index(command) => {
+            let mut store = router.write_store(None)?;
+            match command.command {
+                IndexSubcommand::Status(_) => {
+                    let stats = store.index_job_stats()?;
+                    if cli.json {
+                        print_json(&stats)?;
+                    } else {
+                        println!("pending: {}", stats.pending);
+                        println!("running: {}", stats.running);
+                    }
                 }
-            }
-            IndexSubcommand::Run(command) => {
-                let stats = store.run_embedding_jobs(EmbeddingRunOptions {
-                    limit: command.limit.unwrap_or(64).min(1000),
-                    lease_duration: Duration::from_secs(
-                        command.lease_seconds.unwrap_or(1800).min(86_400),
-                    ),
-                    retry_delay: Duration::from_secs(
-                        command.retry_seconds.unwrap_or(60).min(86_400),
-                    ),
-                    cache_dir: model_cache_dir()?,
-                    show_download_progress: !cli.json,
-                    cached_only: command.cached_only,
-                })?;
-                if cli.json {
-                    print_json(&stats)?;
-                } else {
-                    println!("model: {}", stats.model);
-                    println!("cache: {}", stats.cache_dir);
-                    println!("claimed: {}", stats.claimed);
-                    println!("eligible: {}", stats.eligible);
-                    println!("committed: {}", stats.committed);
-                    println!("stale: {}", stats.stale);
-                    println!("retried: {}", stats.retried);
+                IndexSubcommand::Run(command) => {
+                    let stats = store.run_embedding_jobs(EmbeddingRunOptions {
+                        limit: command.limit.unwrap_or(64).min(1000),
+                        lease_duration: Duration::from_secs(
+                            command.lease_seconds.unwrap_or(1800).min(86_400),
+                        ),
+                        retry_delay: Duration::from_secs(
+                            command.retry_seconds.unwrap_or(60).min(86_400),
+                        ),
+                        cache_dir: model_cache_dir()?,
+                        show_download_progress: !cli.json,
+                        cached_only: command.cached_only,
+                    })?;
+                    if cli.json {
+                        print_json(&stats)?;
+                    } else {
+                        println!("model: {}", stats.model);
+                        println!("cache: {}", stats.cache_dir);
+                        println!("claimed: {}", stats.claimed);
+                        println!("eligible: {}", stats.eligible);
+                        println!("committed: {}", stats.committed);
+                        println!("stale: {}", stats.stale);
+                        println!("retried: {}", stats.retried);
+                    }
                 }
-            }
-            IndexSubcommand::Claim(command) => {
-                let jobs = store.claim_index_jobs(
-                    &command.worker,
-                    command.limit.unwrap_or(32).clamp(1, 1000),
-                    Duration::from_secs(command.lease_seconds.unwrap_or(60).clamp(1, 86_400)),
-                )?;
-                if cli.json {
-                    print_json(&jobs)?;
-                } else {
-                    for job in jobs {
+                IndexSubcommand::Claim(command) => {
+                    let jobs = store.claim_index_jobs(
+                        &command.worker,
+                        command.limit.unwrap_or(32).clamp(1, 1000),
+                        Duration::from_secs(command.lease_seconds.unwrap_or(60).clamp(1, 86_400)),
+                    )?;
+                    if cli.json {
+                        print_json(&jobs)?;
+                    } else {
+                        for job in jobs {
+                            println!(
+                                "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                                job.id,
+                                job.entity_type,
+                                job.entity_id,
+                                job.index_kind,
+                                job.generation,
+                                job.lease_token,
+                                job.lease_until
+                            );
+                        }
+                    }
+                }
+                IndexSubcommand::Commit(command) => {
+                    let vector: Vec<f32> = serde_json::from_str(&command.vector)
+                        .context("embedding vector must be a JSON array of numbers")?;
+                    let committed = store.commit_embedding(
+                        &command.job,
+                        command.generation,
+                        &command.lease_token,
+                        &command.model,
+                        &vector,
+                    )?;
+                    if cli.json {
+                        print_json(&serde_json::json!({
+                            "job": command.job,
+                            "generation": command.generation,
+                            "model": command.model,
+                            "committed": committed
+                        }))?;
+                    } else if committed {
                         println!(
-                            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
-                            job.id,
-                            job.entity_type,
-                            job.entity_id,
-                            job.index_kind,
-                            job.generation,
-                            job.lease_token,
-                            job.lease_until
+                            "committed embedding {} generation {} model {}",
+                            command.job, command.generation, command.model
+                        );
+                    } else {
+                        println!(
+                            "stale or unowned job {} generation {}",
+                            command.job, command.generation
+                        );
+                    }
+                }
+                IndexSubcommand::Complete(command) => {
+                    let completed = store.complete_index_job(
+                        &command.job,
+                        command.generation,
+                        &command.lease_token,
+                    )?;
+                    if cli.json {
+                        print_json(&serde_json::json!({
+                            "job": command.job,
+                            "generation": command.generation,
+                            "completed": completed
+                        }))?;
+                    } else if completed {
+                        println!(
+                            "completed {} generation {}",
+                            command.job, command.generation
+                        );
+                    } else {
+                        println!(
+                            "stale or unowned job {} generation {}",
+                            command.job, command.generation
+                        );
+                    }
+                }
+                IndexSubcommand::Retry(command) => {
+                    let retried = store.retry_index_job(
+                        &command.job,
+                        command.generation,
+                        &command.lease_token,
+                        &command.error,
+                        Duration::from_secs(command.delay_seconds.unwrap_or(30).min(86_400)),
+                    )?;
+                    if cli.json {
+                        print_json(&serde_json::json!({
+                            "job": command.job,
+                            "generation": command.generation,
+                            "retried": retried
+                        }))?;
+                    } else if retried {
+                        println!("retried {} generation {}", command.job, command.generation);
+                    } else {
+                        println!(
+                            "stale or unowned job {} generation {}",
+                            command.job, command.generation
                         );
                     }
                 }
             }
-            IndexSubcommand::Commit(command) => {
-                let vector: Vec<f32> = serde_json::from_str(&command.vector)
-                    .context("embedding vector must be a JSON array of numbers")?;
-                let committed = store.commit_embedding(
-                    &command.job,
-                    command.generation,
-                    &command.lease_token,
-                    &command.model,
-                    &vector,
-                )?;
-                if cli.json {
-                    print_json(&serde_json::json!({
-                        "job": command.job,
-                        "generation": command.generation,
-                        "model": command.model,
-                        "committed": committed
-                    }))?;
-                } else if committed {
-                    println!(
-                        "committed embedding {} generation {} model {}",
-                        command.job, command.generation, command.model
-                    );
-                } else {
-                    println!(
-                        "stale or unowned job {} generation {}",
-                        command.job, command.generation
-                    );
-                }
-            }
-            IndexSubcommand::Complete(command) => {
-                let completed = store.complete_index_job(
-                    &command.job,
-                    command.generation,
-                    &command.lease_token,
-                )?;
-                if cli.json {
-                    print_json(&serde_json::json!({
-                        "job": command.job,
-                        "generation": command.generation,
-                        "completed": completed
-                    }))?;
-                } else if completed {
-                    println!(
-                        "completed {} generation {}",
-                        command.job, command.generation
-                    );
-                } else {
-                    println!(
-                        "stale or unowned job {} generation {}",
-                        command.job, command.generation
-                    );
-                }
-            }
-            IndexSubcommand::Retry(command) => {
-                let retried = store.retry_index_job(
-                    &command.job,
-                    command.generation,
-                    &command.lease_token,
-                    &command.error,
-                    Duration::from_secs(command.delay_seconds.unwrap_or(30).min(86_400)),
-                )?;
-                if cli.json {
-                    print_json(&serde_json::json!({
-                        "job": command.job,
-                        "generation": command.generation,
-                        "retried": retried
-                    }))?;
-                } else if retried {
-                    println!("retried {} generation {}", command.job, command.generation);
-                } else {
-                    println!(
-                        "stale or unowned job {} generation {}",
-                        command.job, command.generation
-                    );
-                }
-            }
-        },
+        }
     }
 
     Ok(())
@@ -1097,7 +1140,7 @@ fn memory_project(explicit: Option<&str>, global: bool) -> Result<Option<String>
 /// visible active memory still lacks a current-model vector, recall degrades
 /// to the FTS5 baseline. Incomplete embedding coverage must never make a
 /// canonical active memory disappear from recall.
-fn recall_hits(
+pub fn recall_hits(
     store: &Store,
     query: &str,
     project_id: Option<&str>,
