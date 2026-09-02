@@ -207,7 +207,9 @@ Overrides:
 - `--db /path/to/memory.db` overrides the database for one command.
 - `MEM_HOME=/path/to/dir` moves the managed root (layout, and any legacy `memory.db` pending migration) to that directory.
 
-Reads never create missing databases; writes create exactly the one database a row belongs in. Recall merges project and user stores under a complete-coverage semantic gate with a deterministic lexical fallback; `history` stays single-store by design.
+Reads never create missing databases; writes create exactly the one database a row belongs in.
+
+Created layout directories and store files are private to the current user (`0700` directories, `0600` databases and sidecars); memory text often holds credentials and internal paths, so a shared machine cannot read another user's agent memory. Existing files are never re-permissioned. Recall merges project and user stores under a complete-coverage semantic gate with a deterministic lexical fallback; `history` stays single-store by design.
 
 ### Legacy single file
 

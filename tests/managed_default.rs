@@ -196,3 +196,28 @@ fn recall_respects_byte_budget() {
 
     std::fs::remove_dir_all(&home).expect("cleanup");
 }
+
+#[cfg(unix)]
+#[test]
+fn created_stores_are_private_to_the_user() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = test_home("permissions");
+    let output = run(&home, &["--json", "remember", "private memory", "--global"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let layout = home.join("layout-v1");
+    let mode = std::fs::metadata(&layout)
+        .expect("layout metadata")
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o700, "layout directory must be user-private");
+    let user_db = layout.join("user.db");
+    let mode = std::fs::metadata(&user_db)
+        .expect("database metadata")
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600, "database files must be user-private");
+
+    std::fs::remove_dir_all(&home).expect("cleanup");
+}

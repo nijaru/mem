@@ -134,15 +134,23 @@ impl Store {
     }
 
     pub fn open(path: &Path) -> Result<Self> {
+        let created = !path.exists();
         if let Some(parent) = path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
         {
+            let parent_created = !parent.exists();
             fs::create_dir_all(parent)
                 .with_context(|| format!("create data directory {}", parent.display()))?;
+            if parent_created {
+                restrict_permissions(parent, 0o700)?;
+            }
         }
 
         let connection = Connection::open(path)?;
+        if created {
+            restrict_permissions(path, 0o600)?;
+        }
         let store = Self::connect(connection)?;
         store.migrate()?;
         Ok(store)
@@ -825,6 +833,23 @@ fn fts_query(input: &str, operator: &str) -> Result<String> {
         bail!("search query cannot be empty");
     }
     Ok(terms.join(operator))
+}
+
+/// Memory text can hold credentials and internal paths, so created stores
+/// and their directories are private to the current user. Only creations are
+/// restricted; existing paths keep whatever the user or umask chose.
+fn restrict_permissions(path: &Path, mode: u32) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))
+            .with_context(|| format!("restrict permissions on {}", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, mode);
+    }
+    Ok(())
 }
 
 fn unix_millis() -> Result<i64> {

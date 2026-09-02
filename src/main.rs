@@ -620,6 +620,17 @@ struct ContextMemory {
 }
 
 fn main() {
+    // Memory text can hold credentials and internal paths, and SQLite does
+    // not let a caller set permissions on the WAL/shm sidecars it creates.
+    // A one-shot CLI only writes store files, so a restrictive umask makes
+    // every database and sidecar private to the user by default.
+    #[cfg(unix)]
+    {
+        // safety: umask is a per-process value; changing it only affects
+        // files this short-lived process creates.
+        unsafe { libc::umask(0o077) };
+    }
+
     let argv: Vec<String> = std::env::args().collect();
     let Some(cli) = parse_cli(&argv) else {
         return;
