@@ -449,11 +449,9 @@ struct StorageCommand {
 enum StorageSubcommand {
     /// Show the managed-layout inventory without creating files.
     Status(StorageStatus),
-    /// Migrate a legacy single-file store into the managed layout. (Not yet
-    /// implemented; planned for a following slice.)
+    /// Migrate a legacy single-file store into the managed layout.
     Migrate(StorageMigrate),
-    /// Delete one project's managed database and sidecars. (Not yet
-    /// implemented; planned for a following slice.)
+    /// Delete one project's managed database and sidecars.
     Purge(StoragePurge),
 }
 
