@@ -135,6 +135,8 @@ Use `--json` for machine-readable output:
 mem --json context "publication handoff"
 ```
 
+Recall is byte-bounded as well as count-bounded: `--max-bytes` (default 32768, `0` disables) stops recall at the first hit whose memory text would push the total past the budget, in rank order. The top-ranked hit is always included when any budget allows it, so a query matching one oversized memory still surfaces that match instead of nothing.
+
 ## Episodic history
 
 Episodes index an original session or event stream without replacing that source as the authoritative transcript.

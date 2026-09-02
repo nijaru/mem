@@ -211,6 +211,11 @@ struct ContextCommand {
     #[usage(short = 'n', long)]
     limit: Option<usize>,
 
+    /// Maximum total memory-text bytes to return; recall stops at the first
+    /// hit that would exceed it. Default 32768; 0 disables the budget.
+    #[usage(long)]
+    max_bytes: Option<usize>,
+
     /// Force FTS5 lexical recall instead of semantic-first ranking.
     #[usage(long)]
     lexical: bool,
@@ -657,6 +662,9 @@ fn parse_cli(argv: &[String]) -> Option<MemCli> {
     }
 }
 
+/// Default recall byte budget across all returned memory texts.
+const RECALL_DEFAULT_MAX_BYTES: usize = 32 * 1024;
+
 fn run(cli: MemCli) -> Result<()> {
     // Exact-file bypass: --db/MEM_DB pins every operation to one database.
     // Otherwise the managed layout is the default. A legacy memory.db that
@@ -829,6 +837,7 @@ fn run(cli: MemCli) -> Result<()> {
             };
             let project_id = project.as_ref().map(|project| project.project_id.as_str());
             let limit = command.limit.unwrap_or(10).clamp(1, 100);
+            let max_bytes = command.max_bytes.unwrap_or(RECALL_DEFAULT_MAX_BYTES);
             let hits = crate::storage::routed_recall_hits(
                 &router,
                 project_id,
@@ -836,8 +845,18 @@ fn run(cli: MemCli) -> Result<()> {
                 limit,
                 command.lexical,
             )?;
-            let mut memories = Vec::with_capacity(hits.len());
+            // Rank order, byte-bounded: a single huge memory can no longer
+            // crowd an adapter's context window. The first hit is always
+            // included when any budget allows it, so a query matching one
+            // oversized memory still surfaces something.
+            let mut memories = Vec::new();
+            let mut total = 0usize;
             for hit in hits {
+                let text_bytes = hit.memory.text.len();
+                if max_bytes > 0 && !memories.is_empty() && total + text_bytes > max_bytes {
+                    break;
+                }
+                total += text_bytes;
                 let (store, id) =
                     crate::storage::routed_resolve_memory(&router, project_id, &hit.memory.id)?;
                 let record = store.get(&id)?;

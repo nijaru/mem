@@ -148,3 +148,51 @@ fn migrated_layout_becomes_the_default_surface() {
 
     std::fs::remove_dir_all(&home).expect("cleanup");
 }
+
+#[test]
+fn recall_respects_byte_budget() {
+    let home = test_home("budget");
+    // Global memories; from /tmp (no project) context reads them all.
+    for text in [
+        "budget fact one with a reasonably sized body",
+        "budget fact two with a reasonably sized body",
+        "budget fact three with a reasonably sized body",
+    ] {
+        let output = run(&home, &["--json", "remember", text]);
+        assert!(output.status.success(), "{}", stderr(&output));
+    }
+
+    // A tight budget must cut recall below the item limit.
+    let output = run(
+        &home,
+        &["--json", "context", "budget fact", "--max-bytes", "64"],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    let texts = context_texts(&output);
+    assert!(
+        !texts.is_empty(),
+        "the first hit must be included even when the budget is tight"
+    );
+    let total: usize = texts.iter().map(|text| text.len()).sum();
+    // First hit always included; anything after must fit the budget.
+    assert!(
+        total <= 64 + texts[0].len(),
+        "total {total} far exceeds the 64-byte budget"
+    );
+
+    // A generous budget returns everything up to the item limit.
+    let output = run(
+        &home,
+        &["--json", "context", "budget fact", "--max-bytes", "100000"],
+    );
+    assert_eq!(context_texts(&output).len(), 3);
+
+    // Zero disables the budget.
+    let output = run(
+        &home,
+        &["--json", "context", "budget fact", "--max-bytes", "0"],
+    );
+    assert_eq!(context_texts(&output).len(), 3);
+
+    std::fs::remove_dir_all(&home).expect("cleanup");
+}
