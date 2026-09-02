@@ -509,7 +509,7 @@ struct IndexRun {
     retry_seconds: Option<u64>,
 
     /// Do nothing when the embedding model is not already cached locally.
-    /// Keeps adapter-driven runs (for example at session shutdown) from
+    /// Keeps automated runs (for example at session shutdown) from
     /// downloading the model.
     #[usage(long)]
     cached_only: bool,

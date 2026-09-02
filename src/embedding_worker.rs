@@ -21,8 +21,8 @@ pub struct EmbeddingRunOptions {
     pub retry_delay: Duration,
     pub cache_dir: PathBuf,
     pub show_download_progress: bool,
-    /// Skip the run entirely when the model is not already cached. Adapters
-    /// use this to keep shutdown-time indexing from downloading anything.
+    /// Skip the run entirely when the model is not already cached, so
+    /// shutdown-time indexing never downloads anything.
     pub cached_only: bool,
 }
 
