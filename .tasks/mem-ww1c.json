@@ -1,0 +1,22 @@
+{
+  "project": "mem",
+  "ref": "ww1c",
+  "title": "Add Windows support for mem CLI",
+  "description": "Deferred follow-up. Audit and, where practical, support Windows without changing the current CLI-first behavior. Check managed data/cache paths, file privacy semantics (Unix modes/umask versus Windows ACLs), staged migration directory durability sync, bundled SQLite/fastembed availability, Git/project detection, and add target CI or compile/runtime coverage. Do not begin until Windows support is an explicit product goal; current macOS dogfooding is not blocked.",
+  "status": "open",
+  "priority": 3,
+  "labels": [
+    "portability",
+    "windows"
+  ],
+  "assignees": null,
+  "parent": null,
+  "blocked_by": [],
+  "estimate": null,
+  "due_date": null,
+  "logs": [],
+  "created_at": "2026-09-02T09:30:20.70373Z",
+  "updated_at": "2026-09-02T09:30:20.70373Z",
+  "completed_at": null,
+  "external": {}
+}
