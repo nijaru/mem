@@ -9,6 +9,7 @@ repository = "https://github.com/nijaru/mem"
 readme = "README.md"
 keywords = ["agent", "memory", "cli", "sqlite", "ai"]
 categories = ["command-line-utilities", "database"]
+exclude = [".github", ".tasks", "ai", "scripts", "tests"]
 
 [[bin]]
 name = "mem"
