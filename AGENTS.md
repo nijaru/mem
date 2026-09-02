@@ -12,7 +12,7 @@
 - FTS5 must remain usable without embeddings.
 - Embeddings and vector indexes are derived/rebuildable data and must not be correctness dependencies.
 - Do not add a daemon, ANN index, automatic LLM extraction, sync protocol, or alternative database backend without a demonstrated need.
-- Keep Pi or other agent integrations thin; retrieval/storage policy belongs in the Rust core.
+- Keep the CLI independent of any agent runtime; retrieval/storage policy belongs in the Rust core.
 
 ## Development
 

@@ -1053,7 +1053,7 @@ mod tests {
             .ensure_episode(NewEpisode {
                 project_id: Some("github.com/x/a".to_owned()),
                 workspace_id: None,
-                source_type: "pi-session".to_owned(),
+                source_type: "transcript".to_owned(),
                 source_ref: "sess-1".to_owned(),
                 started_at: Some(1000),
                 metadata_json: None,

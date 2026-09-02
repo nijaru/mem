@@ -322,12 +322,6 @@ fn corpus() -> Vec<Seed<'static>> {
             project: Some(PROJECT),
         },
         Seed {
-            key: "portability",
-            text: "The memory system should remain usable by multiple agents; Pi is only the first adapter, not the architecture boundary.",
-            kind: "constraint",
-            project: Some(PROJECT),
-        },
-        Seed {
             key: "confidence",
             text: "Do not reduce epistemic confidence merely because a memory has not been used recently; decay retrieval utility separately.",
             kind: "constraint",
@@ -401,10 +395,6 @@ fn cases() -> Vec<Case<'static>> {
         Case {
             key: "freshness",
             query: "How should implementation memories react when the files supporting them have changed?",
-        },
-        Case {
-            key: "portability",
-            query: "Is Pi the architecture boundary or just the first client?",
         },
     ]
 }

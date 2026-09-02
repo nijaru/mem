@@ -8,7 +8,7 @@ It provides a small durable substrate for three different kinds of agent context
 - **episodic history** — searchable projections of past sessions with exact source backreferences;
 - **continuation state** — compact per-workspace state describing where work should resume.
 
-`mem` is agent-runtime agnostic. The Rust CLI owns persistence, retrieval, project/workspace identity, and memory semantics; integrations such as Pi can remain thin adapters over the same core.
+`mem` is agent-runtime agnostic. The Rust CLI owns persistence, retrieval, project/workspace identity, and memory semantics without depending on a runtime adapter.
 
 ## Features
 
@@ -104,7 +104,7 @@ Continuation state is keyed by project and workspace rather than shared across e
 
 ```bash
 mem state set \
-  --session pi-session-123 \
+  --session session-123 \
   --goal "qualify publication path" \
   --checkpoint "Loom is green; release build remains"
 
@@ -142,7 +142,7 @@ Recall is byte-bounded as well as count-bounded: `--max-bytes` (default 32768, `
 Episodes index an original session or event stream without replacing that source as the authoritative transcript.
 
 ```bash
-mem episode create pi-session-123 --source-type pi-session
+mem episode create session-123 --source-type transcript
 
 mem episode record <episode-id> message-42 \
   "Publication handoff succeeded" \

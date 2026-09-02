@@ -424,7 +424,7 @@ mod tests {
                 "INSERT INTO episodes (\n\
                      id, project_id, source_type, source_ref, started_at, ended_at, summary,\n\
                      metadata_json, workspace_id\n\
-                 ) VALUES ('episode-1', NULL, 'pi-session', 'session-1', 20, NULL, NULL, NULL, NULL)",
+                 ) VALUES ('episode-1', NULL, 'transcript', 'session-1', 20, NULL, NULL, NULL, NULL)",
                 [],
             )
             .expect("insert existing episode");
@@ -504,7 +504,7 @@ mod tests {
                 "INSERT INTO episodes (\n\
                      id, project_id, source_type, source_ref, started_at, ended_at, summary,\n\
                      metadata_json, workspace_id\n\
-                 ) VALUES ('episode-1', NULL, 'pi-session', 'session-1', 20, NULL, NULL, NULL, NULL)",
+                 ) VALUES ('episode-1', NULL, 'transcript', 'session-1', 20, NULL, NULL, NULL, NULL)",
                 [],
             )
             .expect("insert existing episode");

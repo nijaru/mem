@@ -189,12 +189,6 @@ fn corpus() -> Vec<Seed<'static>> {
             project: Some(PROJECT),
         },
         Seed {
-            key: "pi-adapter-boundary",
-            text: "The Pi extension is a thin lifecycle adapter: recall and history policy stay in the Rust core, and the extension only maps Pi session events onto mem operations.",
-            kind: "decision",
-            project: Some(PROJECT),
-        },
-        Seed {
             key: "semantic-only-wins",
             text: "On the first synthetic retrieval evaluation, exact semantic search beat the lexical OR baseline on hit@1 and MRR, but equal-weight RRF hybrid ranking demoted several semantic-only wins and reduced per-case quality on those queries.",
             kind: "fact",
@@ -286,10 +280,6 @@ fn cases() -> Vec<Case<'static>> {
         Case {
             key: "episode-ownership",
             query: "If the same session content is ingested twice, do we get duplicate episode entries?",
-        },
-        Case {
-            key: "pi-adapter-boundary",
-            query: "Where does ranking policy live once Pi is only one of several clients?",
         },
         Case {
             key: "semantic-only-wins",

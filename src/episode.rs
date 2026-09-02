@@ -511,7 +511,7 @@ mod tests {
             .ensure_episode(NewEpisode {
                 project_id: Some(project.to_owned()),
                 workspace_id: Some("branch:main".to_owned()),
-                source_type: "pi".to_owned(),
+                source_type: "session".to_owned(),
                 source_ref: "session-1".to_owned(),
                 started_at: Some(10),
                 metadata_json: None,
@@ -521,7 +521,7 @@ mod tests {
             .ensure_episode(NewEpisode {
                 project_id: Some(project.to_owned()),
                 workspace_id: Some("branch:main".to_owned()),
-                source_type: "pi".to_owned(),
+                source_type: "session".to_owned(),
                 source_ref: "session-1".to_owned(),
                 started_at: Some(10),
                 metadata_json: None,
@@ -571,7 +571,7 @@ mod tests {
             .ensure_episode(NewEpisode {
                 project_id: None,
                 workspace_id: None,
-                source_type: "pi-session".to_owned(),
+                source_type: "transcript".to_owned(),
                 source_ref: "session-1".to_owned(),
                 started_at: Some(10),
                 metadata_json: None,

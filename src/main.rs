@@ -243,7 +243,7 @@ struct Remember {
     #[usage(long)]
     actor: Option<String>,
 
-    /// Provenance type, such as cli, pi-session, git, file, or url.
+    /// Provenance type, such as cli, session, git, file, or url.
     #[usage(long)]
     source_type: Option<String>,
 
@@ -269,7 +269,7 @@ struct Correct {
     #[usage(long)]
     actor: Option<String>,
 
-    /// Provenance type for the correction, such as cli, pi-session, git, file, or url.
+    /// Provenance type for the correction, such as cli, session, git, file, or url.
     #[usage(long)]
     source_type: Option<String>,
 
@@ -336,7 +336,7 @@ struct EpisodeCreate {
     /// Stable source reference for the original session or event stream.
     source_ref: String,
 
-    /// Source type, such as pi-session, codex-session, or transcript.
+    /// Source type, such as session, transcript, or event-stream.
     #[usage(long)]
     source_type: Option<String>,
 

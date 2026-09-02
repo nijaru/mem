@@ -1284,7 +1284,7 @@ mod routing_tests {
         user.connection
             .execute(
                 "INSERT INTO episodes (id, project_id, source_type, source_ref, started_at, ended_at, summary, metadata_json, workspace_id)\n\
-                 VALUES ('eeee-0000-aaaa-bbbb', NULL, 'pi-session', 's1', 10, NULL, NULL, NULL, NULL)",
+                 VALUES ('eeee-0000-aaaa-bbbb', NULL, 'transcript', 's1', 10, NULL, NULL, NULL, NULL)",
                 [],
             )
             .expect("insert user episode");
@@ -1296,7 +1296,7 @@ mod routing_tests {
             .connection
             .execute(
                 "INSERT INTO episodes (id, project_id, source_type, source_ref, started_at, ended_at, summary, metadata_json, workspace_id)\n\
-                 VALUES ('eeee-0000-aaaa-cccc', 'github.com/x/y', 'pi-session', 's2', 10, NULL, NULL, NULL, NULL)",
+                 VALUES ('eeee-0000-aaaa-cccc', 'github.com/x/y', 'transcript', 's2', 10, NULL, NULL, NULL, NULL)",
                 [],
             )
             .expect("insert project episode");
