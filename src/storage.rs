@@ -529,8 +529,10 @@ pub fn routed_recall_hits(
     Ok(interleave_hits(per_store, limit))
 }
 
-/// Routed explicit lexical search (`mem search`): precise AND matching per
-/// store, merged by the same deterministic interleave.
+/// Routed explicit lexical search (`mem search`): bm25-ranked OR matching
+/// per store, merged by the same deterministic interleave. Full term
+/// matches rank above partial ones, so ranking carries the precision
+/// instead of discarding partial matches.
 pub fn routed_lexical_search(
     router: &StorageRouter,
     project_id: Option<&str>,

@@ -184,7 +184,7 @@ Supported commands can override automatic detection with `--project` and `--work
 
 Semantic search uses SQLite FTS5 immediately; no external service or model is required.
 
-- `mem search` uses precise lexical `AND` matching.
+- `mem search` uses bm25-ranked lexical matching: results matching more query terms rank higher, and partial matches stay visible instead of being discarded.
 - `mem context` ranks semantically when the local embedding model is already cached and every active memory visible in the query scope has a current-model vector, and falls back to broader lexical `OR` recall otherwise. `--lexical` forces the lexical baseline.
 - superseded and deleted memories remain in canonical storage but are excluded from active retrieval.
 
