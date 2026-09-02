@@ -475,6 +475,10 @@ fn history_hit_from_row(row: &Row<'_>) -> rusqlite::Result<HistoryHit> {
     })
 }
 
+/// History search ranks with bm25 across all query terms (OR matching),
+/// so partial term matches stay visible and rank below full matches
+/// instead of being discarded — the same ranked-visibility contract as
+/// memory search.
 fn fts_query(input: &str) -> Result<String> {
     let terms: Vec<String> = input
         .split_whitespace()
@@ -483,7 +487,7 @@ fn fts_query(input: &str) -> Result<String> {
     if terms.is_empty() {
         bail!("history query cannot be empty");
     }
-    Ok(terms.join(" AND "))
+    Ok(terms.join(" OR "))
 }
 
 fn unix_millis() -> Result<i64> {
@@ -550,6 +554,17 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].episode_source_ref, "session-1");
         assert_eq!(hits[0].entry_source_ref, "entry-7");
+
+        // Ranked visibility: a term that appears in no entry text must not
+        // discard the entry that matches the remaining terms.
+        let partial = store
+            .history_search("publication nonexistentterm", Some(project), 10)
+            .expect("search history with a non-matching term");
+        assert_eq!(
+            partial.len(),
+            1,
+            "partial term matches must stay visible under bm25 ranking"
+        );
 
         let record = store.get_episode(&episode.id).expect("read episode");
         assert_eq!(record.entries.len(), 1);
