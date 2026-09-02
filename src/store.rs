@@ -319,15 +319,22 @@ impl Store {
         })
     }
 
+    /// Lexical search over the memory corpus. Ranked with bm25 across all
+    /// query terms (OR semantics), so partial matches stay visible and
+    /// rank below full matches instead of being discarded; explicit search
+    /// must never return empty while the semantic tier finds the same
+    /// corpus relevant.
     pub fn search(
         &self,
         query: &str,
         project_id: Option<&str>,
         limit: usize,
     ) -> Result<Vec<SearchHit>> {
-        self.search_fts(&fts_query(query, " AND ")?, project_id, limit)
+        self.search_fts(&fts_query(query, " OR ")?, project_id, limit)
     }
 
+    /// Broad lexical recall used by `mem context` when semantic ranking is
+    /// unavailable or coverage is incomplete. Same OR matching as [`search`].
     pub fn recall(
         &self,
         query: &str,
@@ -1030,16 +1037,73 @@ mod tests {
             })
             .expect("store global memory");
 
-        assert!(
-            store
-                .search("publication preference", Some(project), 10)
-                .expect("strict search")
-                .is_empty()
-        );
+        // Dogfood regression (omengrep session, 2026-09-02): a query whose
+        // terms never co-occur literally in any memory must still return
+        // ranked partial matches from explicit lexical search. Strict AND
+        // semantics made `mem search` return [] while the semantic tier
+        // found five hits on the same corpus — the two tiers must never
+        // silently disagree about whether relevant memory exists.
+        let ranked = store
+            .search("publication preference", Some(project), 10)
+            .expect("ranked lexical search");
+        assert_eq!(ranked.len(), 2);
+        // Full term matches rank above partial matches under bm25.
+        assert!(ranked[0].rank <= ranked[1].rank, "hits must be ranked");
         let recalled = store
             .recall("publication preference", Some(project), 10)
             .expect("broad recall");
         assert_eq!(recalled.len(), 2);
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn colliding_id_prefixes_stay_individually_addressable() {
+        // Dogfood regression (omengrep session, 2026-09-02): UUIDv7 IDs minted
+        // in the same millisecond share long prefixes, and `context` can
+        // legitimately return both. Displayed prefixes must never collide in
+        // practice, but when they do, resolution must fail explicitly rather
+        // than silently returning either memory.
+        let path = test_path();
+        let mut store = Store::open(&path).expect("open test store");
+        let first = store
+            .remember(NewMemory {
+                text: "first colliding memory".to_owned(),
+                kind: "fact".to_owned(),
+                project_id: None,
+                actor: "agent".to_owned(),
+                source_type: "test".to_owned(),
+                source_ref: None,
+            })
+            .expect("store first memory")
+            .id;
+        let second = store
+            .remember(NewMemory {
+                text: "second colliding memory".to_owned(),
+                kind: "fact".to_owned(),
+                project_id: None,
+                actor: "agent".to_owned(),
+                source_type: "test".to_owned(),
+                source_ref: None,
+            })
+            .expect("store second memory")
+            .id;
+
+        if first.len() >= 8 && second.len() >= 8 && first[..8] == second[..8] {
+            let ambiguous = &first[..8];
+            assert!(store.get(ambiguous).is_err(), "ambiguous prefix must error");
+        }
+        // Exact IDs always resolve even when they share a prefix.
+        assert_eq!(
+            store.get(&first).expect("exact first").memory.id,
+            first,
+            "exact ID must always resolve"
+        );
+        assert_eq!(
+            store.get(&second).expect("exact second").memory.id,
+            second,
+            "exact ID must always resolve"
+        );
 
         cleanup(&path);
     }
