@@ -41,6 +41,23 @@ pub struct NewWorkspaceState {
     pub checkpoint: Option<String>,
 }
 
+/// Fields `state patch` may update. Session/goal/task/checkpoint are the
+/// mutable payload; project and workspace identify the state row.
+pub const PATCHABLE_FIELDS: &[&str] = &["session", "goal", "task", "checkpoint"];
+
+/// Partial continuation-state update: only provided fields change.
+#[derive(Debug, Default)]
+pub struct NewWorkspaceStatePatch {
+    pub project_id: String,
+    pub workspace_id: String,
+    pub last_session_id: Option<String>,
+    pub active_goal: Option<String>,
+    pub active_task_ref: Option<String>,
+    pub checkpoint: Option<String>,
+    /// Field names to explicitly null out.
+    pub clear_fields: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Memory {
     pub id: String,
@@ -397,6 +414,55 @@ impl Store {
             .context("workspace state disappeared after write")
     }
 
+    /// Atomically update only the provided fields of one workspace's
+    /// continuation state. Absent fields keep their current values (or stay
+    /// absent for a new state row); `None` in `clear_fields` explicitly
+    /// nulls that field. This is the partial-update primitive adapters use
+    /// instead of read-merge-write, which races concurrent writers.
+    pub fn patch_workspace_state(&self, input: NewWorkspaceStatePatch) -> Result<WorkspaceState> {
+        validate_identity(&input.project_id, "project")?;
+        validate_identity(&input.workspace_id, "workspace")?;
+        validate_optional(&input.last_session_id, "session")?;
+        validate_optional(&input.active_goal, "goal")?;
+        validate_optional(&input.active_task_ref, "task")?;
+        validate_optional(&input.checkpoint, "checkpoint")?;
+        for field in &input.clear_fields {
+            if !PATCHABLE_FIELDS.contains(&field.as_str()) {
+                bail!("unknown state field: {field}");
+            }
+        }
+
+        let now = unix_millis()?;
+        self.connection.execute(
+            "INSERT INTO workspace_state (
+                 project_id, workspace_id, last_session_id, active_goal, active_task_ref,
+                 checkpoint, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(project_id, workspace_id) DO UPDATE SET
+                 last_session_id = COALESCE(?3, CASE WHEN ?8 THEN NULL ELSE last_session_id END),
+                 active_goal = COALESCE(?4, CASE WHEN ?9 THEN NULL ELSE active_goal END),
+                 active_task_ref = COALESCE(?5, CASE WHEN ?10 THEN NULL ELSE active_task_ref END),
+                 checkpoint = COALESCE(?6, CASE WHEN ?11 THEN NULL ELSE checkpoint END),
+                 updated_at = ?7",
+            params![
+                &input.project_id,
+                &input.workspace_id,
+                &input.last_session_id,
+                &input.active_goal,
+                &input.active_task_ref,
+                &input.checkpoint,
+                now,
+                input.clear_fields.iter().any(|field| field == "session"),
+                input.clear_fields.iter().any(|field| field == "goal"),
+                input.clear_fields.iter().any(|field| field == "task"),
+                input.clear_fields.iter().any(|field| field == "checkpoint"),
+            ],
+        )?;
+
+        self.workspace_state(&input.project_id, &input.workspace_id)?
+            .context("workspace state disappeared after write")
+    }
+
     pub fn clear_workspace_state(&self, project_id: &str, workspace_id: &str) -> Result<bool> {
         validate_identity(project_id, "project")?;
         validate_identity(workspace_id, "workspace")?;
@@ -716,7 +782,7 @@ fn unix_millis() -> Result<i64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{NewCorrection, NewMemory, NewWorkspaceState, Store};
+    use super::{NewCorrection, NewMemory, NewWorkspaceState, NewWorkspaceStatePatch, Store};
     use uuid::Uuid;
 
     #[test]
@@ -758,6 +824,102 @@ mod tests {
                 .expect("read cleared state")
                 .is_none()
         );
+
+        let store = Store::open(&test_path()).expect("open patch store");
+        store
+            .set_workspace_state(NewWorkspaceState {
+                project_id: "github.com/nijaru/mem".to_owned(),
+                workspace_id: "branch:main".to_owned(),
+                last_session_id: Some("session-1".to_owned()),
+                active_goal: Some("build continuation state".to_owned()),
+                active_task_ref: Some("tk-42".to_owned()),
+                checkpoint: Some("v1".to_owned()),
+            })
+            .expect("seed state for patch");
+
+        // Patch only the checkpoint: every other field must survive.
+        let state = store
+            .patch_workspace_state(NewWorkspaceStatePatch {
+                project_id: "github.com/nijaru/mem".to_owned(),
+                workspace_id: "branch:main".to_owned(),
+                checkpoint: Some("v2".to_owned()),
+                ..Default::default()
+            })
+            .expect("patch checkpoint");
+        assert_eq!(state.checkpoint.as_deref(), Some("v2"));
+        assert_eq!(state.last_session_id.as_deref(), Some("session-1"));
+        assert_eq!(
+            state.active_goal.as_deref(),
+            Some("build continuation state")
+        );
+        assert_eq!(state.active_task_ref.as_deref(), Some("tk-42"));
+
+        // Explicit clear nulls exactly the named fields.
+        let state = store
+            .patch_workspace_state(NewWorkspaceStatePatch {
+                project_id: "github.com/nijaru/mem".to_owned(),
+                workspace_id: "branch:main".to_owned(),
+                clear_fields: vec!["goal".to_owned(), "task".to_owned()],
+                ..Default::default()
+            })
+            .expect("clear goal and task");
+        assert_eq!(state.active_goal, None);
+        assert_eq!(state.active_task_ref, None);
+        assert_eq!(state.last_session_id.as_deref(), Some("session-1"));
+        assert_eq!(state.checkpoint.as_deref(), Some("v2"));
+
+        // Patch on a missing row creates it with only the provided fields.
+        let state = store
+            .patch_workspace_state(NewWorkspaceStatePatch {
+                project_id: "github.com/nijaru/mem".to_owned(),
+                workspace_id: "branch:feature".to_owned(),
+                active_goal: Some("resume work".to_owned()),
+                ..Default::default()
+            })
+            .expect("patch new row");
+        assert_eq!(state.active_goal.as_deref(), Some("resume work"));
+        assert_eq!(state.last_session_id, None);
+
+        // Unknown field names are rejected instead of silently ignored.
+        let error = store
+            .patch_workspace_state(NewWorkspaceStatePatch {
+                project_id: "github.com/nijaru/mem".to_owned(),
+                workspace_id: "branch:main".to_owned(),
+                clear_fields: vec!["project".to_owned()],
+                ..Default::default()
+            })
+            .expect_err("unknown field must fail");
+        assert!(
+            format!("{error:#}").contains("unknown state field"),
+            "unexpected error: {error:#}"
+        );
+
+        // A patch must not lose another writer's concurrent field update:
+        // the read-merge-write anti-pattern this API exists to prevent.
+        let db_path = store.path().expect("test store path");
+        let writer = Store::open(std::path::Path::new(db_path)).expect("open second writer");
+        writer
+            .patch_workspace_state(NewWorkspaceStatePatch {
+                project_id: "github.com/nijaru/mem".to_owned(),
+                workspace_id: "branch:main".to_owned(),
+                active_goal: Some("writer goal".to_owned()),
+                ..Default::default()
+            })
+            .expect("concurrent goal patch");
+        let state = store
+            .patch_workspace_state(NewWorkspaceStatePatch {
+                project_id: "github.com/nijaru/mem".to_owned(),
+                workspace_id: "branch:main".to_owned(),
+                active_task_ref: Some("tk-7".to_owned()),
+                ..Default::default()
+            })
+            .expect("second patch");
+        assert_eq!(
+            state.active_goal.as_deref(),
+            Some("writer goal"),
+            "concurrent field update must survive this writer's patch"
+        );
+        assert_eq!(state.active_task_ref.as_deref(), Some("tk-7"));
 
         cleanup(&path);
     }

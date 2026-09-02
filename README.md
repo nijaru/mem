@@ -112,6 +112,13 @@ mem state show
 mem state clear
 ```
 
+`state set` replaces the whole row; `state patch` updates only the provided fields atomically, so adapters never need read-merge-write (which races concurrent writers) and never wipe fields they did not read:
+
+```bash
+mem state patch --checkpoint "Loom is green; release build remains"
+mem state patch --clear goal
+```
+
 This keeps durable project knowledge shared while allowing independent branches or worktrees to resume different work safely.
 
 ## Agent context

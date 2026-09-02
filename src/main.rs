@@ -35,8 +35,8 @@ fn require_exact_store(router: &StorageRouter) -> Result<Store> {
     }
 }
 use crate::store::{
-    Memory, MemorySource, NewCorrection, NewMemory, NewWorkspaceState, SearchHit, Store,
-    WorkspaceState,
+    Memory, MemorySource, NewCorrection, NewMemory, NewWorkspaceState, NewWorkspaceStatePatch,
+    SearchHit, Store, WorkspaceState,
 };
 
 #[derive(Cli)]
@@ -103,6 +103,7 @@ struct State {
 enum StateCommand {
     Show(StateShow),
     Set(StateSet),
+    Patch(StatePatch),
     Clear(StateClear),
 }
 
@@ -144,6 +145,40 @@ struct StateSet {
     /// Compact resume checkpoint.
     #[usage(long)]
     checkpoint: Option<String>,
+}
+
+/// Update only the provided fields of the current workspace's continuation
+/// state; omitted fields keep their current values.
+#[derive(Args)]
+struct StatePatch {
+    /// Override the project identifier.
+    #[usage(long)]
+    project: Option<String>,
+
+    /// Override the workspace identifier.
+    #[usage(long)]
+    workspace: Option<String>,
+
+    /// Last agent/session identifier associated with this checkpoint.
+    #[usage(long)]
+    session: Option<String>,
+
+    /// Current high-level goal.
+    #[usage(long)]
+    goal: Option<String>,
+
+    /// Optional external task reference.
+    #[usage(long)]
+    task: Option<String>,
+
+    /// Compact resume checkpoint.
+    #[usage(long)]
+    checkpoint: Option<String>,
+
+    /// Field to clear (set to nothing): one of session, goal, task, checkpoint.
+    /// Repeatable.
+    #[usage(long, var)]
+    clear: Vec<String>,
 }
 
 /// Remove continuation state for the current workspace.
@@ -729,6 +764,25 @@ fn run(cli: MemCli) -> Result<()> {
                     active_goal: command.goal,
                     active_task_ref: command.task,
                     checkpoint: command.checkpoint,
+                })?;
+                if cli.json {
+                    print_json(&state)?;
+                } else {
+                    print_workspace_state(&state);
+                }
+            }
+            StateCommand::Patch(command) => {
+                let context =
+                    project_context(command.project.as_deref(), command.workspace.as_deref())?;
+                let store = router.write_store(Some(&context.project_id))?;
+                let state = store.patch_workspace_state(NewWorkspaceStatePatch {
+                    project_id: context.project_id,
+                    workspace_id: context.workspace_id,
+                    last_session_id: command.session,
+                    active_goal: command.goal,
+                    active_task_ref: command.task,
+                    checkpoint: command.checkpoint,
+                    clear_fields: command.clear,
                 })?;
                 if cli.json {
                     print_json(&state)?;
