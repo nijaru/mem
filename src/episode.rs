@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use crate::store::Store;
 
+#[derive(Clone)]
 pub struct NewEpisode {
     pub project_id: Option<String>,
     pub workspace_id: Option<String>,
@@ -79,26 +80,18 @@ impl Store {
     pub fn ensure_episode(&self, input: NewEpisode) -> Result<Episode> {
         validate_episode(&input)?;
 
-        if let Some(existing) = self.episode_by_source(&input.source_type, &input.source_ref)? {
-            if existing.project_id != input.project_id
-                || existing.workspace_id != input.workspace_id
-            {
-                bail!(
-                    "episode source {}:{} is already bound to a different project/workspace",
-                    input.source_type,
-                    input.source_ref
-                );
-            }
-            return Ok(existing);
-        }
-
+        // One conflict-safe statement: the source's identity decides. Two
+        // adapters creating the same episode concurrently converge on one
+        // row; the first binding wins and a later mismatched binding is
+        // rejected by reading back what actually landed.
         let id = Uuid::now_v7().to_string();
         let started_at = input.started_at.or(Some(unix_millis()?));
         self.connection.execute(
             "INSERT INTO episodes (\n\
                  id, project_id, source_type, source_ref, started_at, ended_at, summary,\n\
                  metadata_json, workspace_id\n\
-             ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, ?6, ?7)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, ?6, ?7)\n\
+             ON CONFLICT(source_type, source_ref) DO NOTHING",
             params![
                 id,
                 input.project_id,
@@ -109,7 +102,17 @@ impl Store {
                 input.workspace_id
             ],
         )?;
-        self.episode_by_id(&id)
+        let stored = self
+            .episode_by_source(&input.source_type, &input.source_ref)?
+            .context("episode disappeared after upsert")?;
+        if stored.project_id != input.project_id || stored.workspace_id != input.workspace_id {
+            bail!(
+                "episode source {}:{} is already bound to a different project/workspace",
+                input.source_type,
+                input.source_ref
+            );
+        }
+        Ok(stored)
     }
 
     pub fn record_episode_entry(
@@ -120,6 +123,36 @@ impl Store {
         validate_episode_entry(&input)?;
         let episode_id = self.resolve_episode_id(episode_id_or_prefix)?;
 
+        // First record attempts a conflict-safe insert; the loser of a
+        // concurrent first-record falls through to the refresh below, which
+        // updates the winner's row instead of failing on the unique index.
+        if input.ordinal.is_some() {
+            let id = Uuid::now_v7().to_string();
+            let ordinal = input.ordinal.unwrap_or_default();
+            let inserted = self.connection.execute(
+                "INSERT INTO episode_entries (\n\
+                     id, episode_id, source_ref, ordinal, kind, role, text, occurred_at, metadata_json\n\
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)\n\
+                 ON CONFLICT(episode_id, source_ref) DO NOTHING",
+                params![
+                    id,
+                    episode_id,
+                    input.source_ref,
+                    ordinal,
+                    input.kind,
+                    input.role,
+                    input.text,
+                    input.occurred_at,
+                    input.metadata_json
+                ],
+            )?;
+            if inserted > 0 {
+                return self.episode_entry_by_id(&id);
+            }
+        }
+
+        // Refresh (or first-record without an explicit ordinal): read the
+        // current row state inside the same statement flow, then update.
         let existing: Option<(String, i64)> = self
             .connection
             .query_row(
@@ -130,7 +163,6 @@ impl Store {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-
         if let Some((id, existing_ordinal)) = existing {
             let ordinal = input.ordinal.unwrap_or(existing_ordinal);
             self.connection.execute(
@@ -165,7 +197,8 @@ impl Store {
         self.connection.execute(
             "INSERT INTO episode_entries (\n\
                  id, episode_id, source_ref, ordinal, kind, role, text, occurred_at, metadata_json\n\
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)\n\
+             ON CONFLICT(episode_id, source_ref) DO NOTHING",
             params![
                 id,
                 episode_id,
@@ -597,5 +630,88 @@ mod tests {
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(path.with_extension("db-shm"));
         let _ = std::fs::remove_file(path.with_extension("db-wal"));
+    }
+
+    #[test]
+    fn concurrent_ensure_and_entry_upserts_are_idempotent() {
+        let path = test_path();
+        // Two real threads hitting the same episode source simultaneously:
+        // the check-then-insert window is what a sequential test cannot
+        // compress.
+        let db = path.display().to_string();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let make_input = |source_ref: &'static str| NewEpisode {
+            project_id: Some("github.com/x/race".to_owned()),
+            workspace_id: None,
+            source_type: "session".to_owned(),
+            source_ref: source_ref.to_owned(),
+            started_at: Some(1),
+            metadata_json: None,
+        };
+        let episodes: Vec<std::sync::Arc<NewEpisode>> = (0..2)
+            .map(|_| std::sync::Arc::new(make_input("threaded")))
+            .collect();
+        let handles: Vec<_> = (0..2)
+            .map(|i| {
+                let db = db.clone();
+                let barrier = barrier.clone();
+                let input = episodes[i].clone();
+                std::thread::spawn(move || {
+                    let store = Store::open(std::path::Path::new(&db))
+                        .unwrap_or_else(|error| panic!("open store: {error:#}"));
+                    barrier.wait();
+                    store.ensure_episode((*input).clone())
+                })
+            })
+            .collect();
+        let mut ids = Vec::new();
+        for handle in handles {
+            match handle.join().expect("thread panicked") {
+                Ok(episode) => ids.push(episode.id),
+                Err(error) => panic!("concurrent ensure failed: {error:#}"),
+            }
+        }
+        assert_eq!(ids[0], ids[1], "both threads must converge on one episode");
+
+        let a = Store::open(&path).expect("open writer a");
+        let b = Store::open(std::path::Path::new(a.path().expect("path"))).expect("open writer b");
+
+        let input = NewEpisode {
+            project_id: Some("github.com/x/race".to_owned()),
+            workspace_id: None,
+            source_type: "session".to_owned(),
+            source_ref: "shared".to_owned(),
+            started_at: Some(1),
+            metadata_json: None,
+        };
+        let first = a.ensure_episode(input.clone()).expect("writer a creates");
+        let second = b
+            .ensure_episode(input)
+            .expect("writer b must upsert, not fail");
+        assert_eq!(first.id, second.id, "both writers must see one episode");
+
+        // Entries: concurrent first-record of the same source_ref upserts.
+        let entry = |text: &str| NewEpisodeEntry {
+            source_ref: "e-1".to_owned(),
+            ordinal: None,
+            kind: "message".to_owned(),
+            role: Some("user".to_owned()),
+            text: text.to_owned(),
+            occurred_at: Some(2),
+            metadata_json: None,
+        };
+        let first_entry = a
+            .record_episode_entry(&first.id, entry("from a"))
+            .expect("writer a records entry");
+        let second_entry = b
+            .record_episode_entry(&first.id, entry("from b"))
+            .expect("writer b must upsert, not fail");
+        assert_eq!(first_entry.id, second_entry.id, "one entry row, not two");
+        assert_eq!(
+            second_entry.text, "from b",
+            "last write wins, matching the sequential upsert"
+        );
+
+        cleanup(&path);
     }
 }

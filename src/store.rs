@@ -162,9 +162,42 @@ impl Store {
 
     fn connect(connection: Connection) -> Result<Self> {
         connection.busy_timeout(Duration::from_secs(5))?;
+        // Switching into WAL needs a brief exclusive moment that does not
+        // honor the busy handler, so concurrent openers race the flip and
+        // one fails instantly. Only flip when the database is not already
+        // in WAL; a concurrent flip that lost the race reads back as WAL
+        // and continues.
+        let mode: String = connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+        if mode != "wal" {
+            // First open races another first open: the WAL flip needs a brief
+            // exclusive moment that ignores the busy handler, so the loser
+            // gets an instant "database is locked". Retry a few times — the
+            // winner's flip makes the mode read back "wal" and both proceed.
+            let mut flip_error = None;
+            for _ in 0..20 {
+                match connection.execute_batch("PRAGMA journal_mode=WAL;") {
+                    Ok(()) => {
+                        flip_error = None;
+                        break;
+                    }
+                    Err(error) => {
+                        let mode: String =
+                            connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+                        if mode == "wal" {
+                            flip_error = None;
+                            break;
+                        }
+                        flip_error = Some(error);
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                }
+            }
+            if let Some(error) = flip_error {
+                return Err(error.into());
+            }
+        }
         connection.execute_batch(
-            "PRAGMA journal_mode=WAL;\n\
-             PRAGMA foreign_keys=ON;\n\
+            "PRAGMA foreign_keys=ON;\n\
              PRAGMA synchronous=NORMAL;",
         )?;
         Ok(Self { connection })
@@ -527,26 +560,47 @@ impl Store {
             );
         }
 
+        // Concurrent creators (an adapter session plus a background indexer,
+        // say) can both observe an old version and both apply the next
+        // migration; the loser's CREATE fails after the winner commits. On
+        // that failure the version has already advanced past the step, so
+        // re-reading it and continuing converges instead of crashing.
+        let apply = |sql: &'static str, from_version: i64| -> Result<()> {
+            match self.connection.execute_batch(sql) {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    // A batch that fails mid-script leaves its transaction
+                    // open. Close it before deciding: continuing with an
+                    // open transaction would let later writes "succeed"
+                    // invisibly inside a transaction nobody commits.
+                    let _ = self.connection.execute_batch("ROLLBACK");
+                    let current = self.schema_version()?;
+                    if current > from_version {
+                        Ok(())
+                    } else {
+                        Err(error.into())
+                    }
+                }
+            }
+        };
+
         if version == 0 {
-            self.connection
-                .execute_batch(include_str!("../migrations/0001_initial.sql"))?;
+            apply(include_str!("../migrations/0001_initial.sql"), 0)?;
         }
         if self.schema_version()? == 1 {
-            self.connection
-                .execute_batch(include_str!("../migrations/0002_episode_entries.sql"))?;
+            apply(include_str!("../migrations/0002_episode_entries.sql"), 1)?;
         }
         if self.schema_version()? == 2 {
-            self.connection
-                .execute_batch(include_str!("../migrations/0003_index_jobs.sql"))?;
+            apply(include_str!("../migrations/0003_index_jobs.sql"), 2)?;
         }
         if self.schema_version()? == 3 {
-            self.connection
-                .execute_batch(include_str!("../migrations/0004_embeddings.sql"))?;
+            apply(include_str!("../migrations/0004_embeddings.sql"), 3)?;
         }
         if self.schema_version()? == 4 {
-            self.connection.execute_batch(include_str!(
-                "../migrations/0005_episode_vectors_disabled.sql"
-            ))?;
+            apply(
+                include_str!("../migrations/0005_episode_vectors_disabled.sql"),
+                4,
+            )?;
         }
 
         let version = self.schema_version()?;
