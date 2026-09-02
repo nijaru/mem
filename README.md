@@ -240,6 +240,10 @@ A semantic memory is either global or project-scoped and has one of three status
 
 Corrections create a replacement record in the same scope, attach fresh provenance, mark the old memory `superseded`, and retain an explicit `superseded_by` relation. The previous evidence remains inspectable instead of being overwritten.
 
+### Provenance is descriptive, not authority
+
+Every memory records `actor` and `source_type`/`source_ref` provenance. These describe where a memory came from for audit and inspection — they are not authentication. A memory saying it came from a human, a specific agent, or a trusted tool has no more authority than any other memory: retrieval rank never upgrades it, nothing auto-promotes based on it, and adapters should treat recalled memory as supporting context, not instructions. A same-user CLI cannot authenticate "human vs model" from flags alone, so `mem` deliberately makes no authority claims on that basis.
+
 ## Status
 
 `mem` is pre-1.0 and under active development. The local semantic-memory, continuation-state, episodic-history, and lexical retrieval core is usable today; interfaces may still evolve before the first stable release.
