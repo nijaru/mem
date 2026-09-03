@@ -11,6 +11,7 @@
 - Provenance is required for promoted semantic memory.
 - FTS5 must remain usable without embeddings.
 - Embeddings and vector indexes are derived/rebuildable data and must not be correctness dependencies.
+- Every multi-statement write transaction uses IMMEDIATE, never deferred: a deferred upgrade fails at COMMIT with SQLITE_BUSY_SNAPSHOT, which the busy timeout never retries, so parallel writers would silently lose writes. Single-statement writes stay in autocommit.
 - Do not add a daemon, ANN index, automatic LLM extraction, sync protocol, or alternative database backend without a demonstrated need.
 - Keep the CLI independent of any agent runtime; retrieval/storage policy belongs in the Rust core.
 

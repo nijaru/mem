@@ -627,7 +627,12 @@ fn staging_store_path(
 }
 
 fn write_share(store: &mut Store, share: &Share) -> Result<()> {
-    let transaction = store.connection.transaction()?;
+    // IMMEDIATE per the repository-wide write-transaction discipline (see
+    // AGENTS.md): mode-only change, behaviorally identical here since the
+    // staging database is private to this migration run.
+    let transaction = store
+        .connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     {
         let mut insert = transaction.prepare(
             "INSERT INTO memories (\n\
