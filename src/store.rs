@@ -3,7 +3,7 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -245,7 +245,13 @@ impl Store {
             "global"
         };
 
-        let transaction = self.connection.transaction()?;
+        // IMMEDIATE (not deferred): concurrent writers must serialize on
+        // the write lock at BEGIN — where the busy handler retries — instead
+        // of racing a mid-transaction upgrade that fails at COMMIT with
+        // SQLITE_BUSY_SNAPSHOT, which bypasses the busy handler entirely.
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         insert_memory(&transaction, &id, scope, &input, now)?;
         insert_source(&transaction, &source_id, &id, &input, now)?;
         transaction.commit()?;
@@ -281,7 +287,12 @@ impl Store {
         let replacement_id = Uuid::now_v7().to_string();
         let source_id = Uuid::now_v7().to_string();
         let now = unix_millis()?;
-        let transaction = self.connection.transaction()?;
+        // IMMEDIATE for the same reason as remember: concurrent writers
+        // serialize at BEGIN under the busy handler instead of failing at
+        // COMMIT with SQLITE_BUSY_SNAPSHOT.
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         insert_memory(
             &transaction,
             &replacement_id,
@@ -1095,6 +1106,52 @@ mod tests {
             );
         }
 
+        cleanup(&path);
+    }
+
+    #[test]
+    fn concurrent_remembers_all_land_without_busy_failures() {
+        // Dogfood regression (omendb-vector session, 2026-09-03): two
+        // `mem remember` calls in one parallel tool block collided with
+        // SQLITE_BUSY and one write was lost. Deferred transactions upgrade
+        // to the write lock mid-transaction and fail at COMMIT with
+        // SQLITE_BUSY_SNAPSHOT, which the busy handler never retries;
+        // IMMEDIATE transactions serialize at BEGIN under the handler.
+        let path = test_path();
+        drop(Store::open(&path).expect("create store"));
+        let workers: Vec<_> = (0..4)
+            .map(|worker| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let mut store = Store::open(&path).expect("open store");
+                    for index in 0..10 {
+                        store
+                            .remember(NewMemory {
+                                text: format!("concurrent {worker}-{index}"),
+                                kind: "fact".to_owned(),
+                                project_id: None,
+                                actor: "agent".to_owned(),
+                                source_type: "test".to_owned(),
+                                source_ref: None,
+                            })
+                            .expect("concurrent remember must succeed");
+                    }
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().expect("worker thread");
+        }
+        let store = Store::open(&path).expect("reopen store");
+        let active: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE status = 'active'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count memories");
+        assert_eq!(active, 40, "every concurrent write must land");
         cleanup(&path);
     }
 
