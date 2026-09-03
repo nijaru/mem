@@ -1304,7 +1304,7 @@ fn run(cli: MemCli) -> Result<()> {
             }
             StorageSubcommand::Migrate(command) => {
                 let layout = if let Some(from) = &command.from {
-                    ManagedLayout::at(PathBuf::from(from))
+                    ManagedLayout::at(legacy_root_from(PathBuf::from(from)))
                 } else {
                     ManagedLayout::resolve()?
                 };
@@ -1458,6 +1458,18 @@ fn cached_query_vector(query: &str) -> Result<Option<Vec<f32>>> {
     };
     // Fail open: a cached-but-broken model must not break adapter recall.
     Ok(embed_query_if_cached(query, &cache_dir).unwrap_or(None))
+}
+
+/// Interpret a `storage migrate --from` value as the legacy root: the
+/// documented contract is a legacy database file, but passing its
+/// containing directory must also work, so a file path is reduced to its
+/// parent directory and a directory path is used as-is.
+fn legacy_root_from(from: PathBuf) -> PathBuf {
+    if from.is_file() {
+        from.parent().map(Path::to_path_buf).unwrap_or(from)
+    } else {
+        from
+    }
 }
 
 fn print_context(output: &ContextOutput) {

@@ -83,7 +83,17 @@ fn normalize_remote(remote: &str) -> String {
     let remote = remote.trim().trim_end_matches('/');
     let remote = remote.strip_suffix(".git").unwrap_or(remote);
 
-    if let Some((_, rest)) = remote.split_once("://") {
+    if let Some((scheme, rest)) = remote.split_once("://") {
+        // file:// URLs are local paths, not host/path pairs; the host
+        // splitting below would misread the first path component as a
+        // network authority (file:///tmp/repo -> "tmp/repo").
+        if scheme.eq_ignore_ascii_case("file") {
+            let path = rest.trim_start_matches('/');
+            if path.is_empty() {
+                return "local:".to_owned();
+            }
+            return format!("local:/{path}");
+        }
         let rest = rest.trim_start_matches('/');
         let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
         let host = authority
@@ -103,6 +113,16 @@ fn normalize_remote(remote: &str) -> String {
         return join_host_path(host, path);
     }
 
+    // Relative local remotes (../shared.git) canonicalize against the
+    // process working directory, so the same repository would map to
+    // different project IDs depending on where inside it `mem` runs.
+    // Git resolves them against the repository root instead.
+    if remote.starts_with('.')
+        && let Some(resolved) = resolve_relative_remote(remote)
+    {
+        return format!("local:{}", resolved.display());
+    }
+
     if let Ok(path) = PathBuf::from(remote).canonicalize() {
         return format!("local:{}", path.display());
     }
@@ -112,6 +132,16 @@ fn normalize_remote(remote: &str) -> String {
     }
 
     remote.to_owned()
+}
+
+/// Resolve a dot-relative git remote against the repository root rather
+/// than the process working directory, matching how git itself resolves
+/// remote paths. Returns None when there is no enclosing repository.
+fn resolve_relative_remote(remote: &str) -> Option<PathBuf> {
+    let root = git_output(&["rev-parse", "--show-toplevel"])?;
+    let resolved = PathBuf::from(root).join(remote);
+    let canonical = resolved.canonicalize().ok()?;
+    Some(canonical)
 }
 
 fn join_host_path(host: &str, path: &str) -> String {
@@ -126,7 +156,7 @@ fn join_host_path(host: &str, path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_remote;
+    use super::{normalize_remote, resolve_relative_remote};
 
     #[test]
     fn normalizes_common_git_remote_forms() {
@@ -138,8 +168,30 @@ mod tests {
                 "github.com/nijaru/mem",
             ),
             ("https://GitHub.COM/nijaru/mem/", "github.com/nijaru/mem"),
+            // file:// remotes are local paths; the first path component is
+            // not a network host (regression: used to yield "tmp/repo").
+            ("file:///tmp/repo.git", "local:/tmp/repo"),
+            ("file://srv/share/repo.git", "local:/srv/share/repo"),
         ] {
             assert_eq!(normalize_remote(input), expected);
+        }
+    }
+
+    #[test]
+    fn relative_remotes_resolve_against_repository_root() {
+        // A dot-relative remote must yield one project ID regardless of the
+        // subdirectory `mem` runs in. `resolve_relative_remote` anchors at
+        // the repository root; this test runs from a stable root (the test
+        // working directory is the repository root) so the assertion is
+        // deterministic here while still pinning the anchoring behavior.
+        let inside_repo = resolve_relative_remote("../src");
+        if let Some(resolved) = inside_repo {
+            // From the repo root, ../src is the crate's src directory.
+            assert!(
+                resolved.ends_with("mem/src"),
+                "unexpected resolution: {}",
+                resolved.display()
+            );
         }
     }
 }
