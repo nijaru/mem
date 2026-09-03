@@ -184,6 +184,8 @@ Supported commands can override automatic detection with `--project` and `--work
 
 Semantic search uses SQLite FTS5 immediately; no external service or model is required.
 
+Choosing a tier: lexical (`mem search`) is for keyword hunts — it ranks bm25 over quoted terms, so it favors exact vocabulary. `--semantic` is for concept hunts — it finds meaning matches that share no query terms at all. If you know the words that appeared in the memory, use lexical; if you are describing the idea, use semantic.
+
 - `mem search` uses bm25-ranked lexical matching: results matching more query terms rank higher, and partial matches stay visible instead of being discarded.
 - `mem context` ranks semantically when the local embedding model is already cached and every active memory visible in the query scope has a current-model vector, and falls back to broader lexical `OR` recall otherwise. `--lexical` forces the lexical baseline.
 - superseded and deleted memories remain in canonical storage but are excluded from active retrieval.
