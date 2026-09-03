@@ -84,12 +84,17 @@ jobs:
 
           lexical_json="$(target/release/mem --json --db "$db" search "$query" --global -n 4)"
           printf '%s\n' "$lexical_json"
-          LEXICAL_JSON="$lexical_json" python3 - <<'PY'
+          LEXICAL_JSON="$lexical_json" TARGET="$target" python3 - <<'PY'
           import json
           import os
 
+          # Lexical search is bm25-ranked OR matching: partial term matches
+          # stay visible. The control demonstrates the semantic tier's value —
+          # the target memory shares no query term, so it must not appear
+          # among lexical hits even though weaker partial matches may.
           hits = json.loads(os.environ["LEXICAL_JSON"])
-          assert hits == [], hits
+          texts = [hit["memory"]["text"] for hit in hits]
+          assert os.environ["TARGET"] not in texts, hits
           PY
 
           semantic_json="$(target/release/mem --json --db "$db" search "$query" --semantic --global -n 4)"
