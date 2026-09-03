@@ -646,11 +646,11 @@ impl Store {
     /// cross-store uniqueness.
     pub fn memory_id_candidates(&self, id_or_prefix: &str) -> Result<Vec<String>> {
         let candidate = id_or_prefix.trim();
-        let prefix = format!("{candidate}%");
+        let prefix = format!("{}%", escape_like_for_prefix(candidate));
         let mut statement = self.connection.prepare(
             "SELECT id\n\
              FROM memories\n\
-             WHERE id = ?1 OR id LIKE ?2\n\
+             WHERE id = ?1 OR id LIKE ?2 ESCAPE '\\'\n\
              ORDER BY CASE WHEN id = ?1 THEN 0 ELSE 1 END, id\n\
              LIMIT 3",
         )?;
@@ -680,11 +680,11 @@ impl Store {
             return Ok(id);
         }
 
-        let prefix = format!("{candidate}%");
+        let prefix = format!("{}%", escape_like_for_prefix(candidate));
         let mut statement = self.connection.prepare(
             "SELECT id\n\
              FROM memories\n\
-             WHERE id = ?1 OR id LIKE ?2\n\
+             WHERE id = ?1 OR id LIKE ?2 ESCAPE '\\'\n\
              ORDER BY CASE WHEN id = ?1 THEN 0 ELSE 1 END, id\n\
              LIMIT 2",
         )?;
@@ -840,6 +840,20 @@ fn fts_query(input: &str, operator: &str) -> Result<String> {
         bail!("search query cannot be empty");
     }
     Ok(terms.join(operator))
+}
+
+/// Escape SQL LIKE wildcards (`_`, `%`, and the escape character itself)
+/// so an ID-prefix candidate matches literally instead of any character.
+/// Shared by memory and episode ID prefix resolution.
+pub(crate) fn escape_like_for_prefix(input: &str) -> String {
+    let mut escaped = String::with_capacity(input.len());
+    for character in input.chars() {
+        if matches!(character, '_' | '%' | '\\') {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
 }
 
 /// Memory text can hold credentials and internal paths, so created stores
@@ -1053,6 +1067,33 @@ mod tests {
             .recall("publication preference", Some(project), 10)
             .expect("broad recall");
         assert_eq!(recalled.len(), 2);
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn like_wildcards_in_id_prefixes_match_literally() {
+        // A `_` or `%` in a candidate must not act as a SQL LIKE wildcard:
+        // prefix resolution is a literal string-prefix match only.
+        let path = test_path();
+        let mut store = Store::open(&path).expect("open test store");
+        store
+            .remember(NewMemory {
+                text: "the only memory in this store".to_owned(),
+                kind: "fact".to_owned(),
+                project_id: None,
+                actor: "agent".to_owned(),
+                source_type: "test".to_owned(),
+                source_ref: None,
+            })
+            .expect("store memory");
+
+        for wildcard in ["_", "%"] {
+            assert!(
+                store.get(wildcard).is_err(),
+                "wildcard {wildcard} must not resolve the memory"
+            );
+        }
 
         cleanup(&path);
     }

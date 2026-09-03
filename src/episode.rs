@@ -333,11 +333,11 @@ impl Store {
     /// cross-store uniqueness.
     pub fn episode_id_candidates(&self, id_or_prefix: &str) -> Result<Vec<String>> {
         let candidate = id_or_prefix.trim();
-        let prefix = format!("{candidate}%");
+        let prefix = format!("{}%", crate::store::escape_like_for_prefix(candidate));
         let mut statement = self.connection.prepare(
             "SELECT id\n\
              FROM episodes\n\
-             WHERE id = ?1 OR id LIKE ?2\n\
+             WHERE id = ?1 OR id LIKE ?2 ESCAPE '\\'\n\
              ORDER BY CASE WHEN id = ?1 THEN 0 ELSE 1 END, id\n\
              LIMIT 3",
         )?;

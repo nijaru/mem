@@ -388,17 +388,17 @@ pub fn routed_resolve_memory(
     }
     let stores = router.id_search_stores(project_hint)?;
     let mut prefix_matches: Vec<(usize, String)> = Vec::new();
-    let mut exact_match: Option<(usize, String)> = None;
+    let mut exact_matches: Vec<(usize, String)> = Vec::new();
     for (index, store) in stores.iter().enumerate() {
         for id in store.memory_id_candidates(candidate)? {
             if id == candidate {
-                exact_match = Some((index, id));
+                exact_matches.push((index, id));
             } else {
                 prefix_matches.push((index, id));
             }
         }
     }
-    resolve_candidate(stores, exact_match, prefix_matches, "memory", candidate)
+    resolve_candidate(stores, exact_matches, prefix_matches, "memory", candidate)
 }
 
 /// Resolve an episode ID or prefix across the search set.
@@ -413,27 +413,33 @@ pub fn routed_resolve_episode(
     }
     let stores = router.id_search_stores(project_hint)?;
     let mut prefix_matches: Vec<(usize, String)> = Vec::new();
-    let mut exact_match: Option<(usize, String)> = None;
+    let mut exact_matches: Vec<(usize, String)> = Vec::new();
     for (index, store) in stores.iter().enumerate() {
         for id in store.episode_id_candidates(candidate)? {
             if id == candidate {
-                exact_match = Some((index, id));
+                exact_matches.push((index, id));
             } else {
                 prefix_matches.push((index, id));
             }
         }
     }
-    resolve_candidate(stores, exact_match, prefix_matches, "episode", candidate)
+    resolve_candidate(stores, exact_matches, prefix_matches, "episode", candidate)
 }
 
 fn resolve_candidate(
     stores: Vec<Store>,
-    exact_match: Option<(usize, String)>,
+    exact_matches: Vec<(usize, String)>,
     prefix_matches: Vec<(usize, String)>,
     kind: &str,
     candidate: &str,
 ) -> Result<(Store, String)> {
-    if let Some((index, id)) = exact_match {
+    // A duplicate exact ID across stores (only reachable through manual
+    // data copies or restores) must fail explicitly: silently picking one
+    // store would route mutations like forget/correct to the wrong one.
+    if exact_matches.len() > 1 {
+        bail!("ambiguous {kind} ID: {candidate} exists in multiple stores");
+    }
+    if let Some((index, id)) = exact_matches.into_iter().next() {
         let store = stores
             .into_iter()
             .nth(index)
@@ -1267,7 +1273,35 @@ mod routing_tests {
             "unexpected error: {error:#}"
         );
 
-        // The full exact ID resolves in its owning store.
+        // A duplicate exact ID across stores (manual copy/restore shape)
+        // fails explicitly instead of silently routing mutations to one
+        // of them.
+        let user = router.write_store(None).expect("user store");
+        user.connection
+            .execute(
+                "INSERT INTO memories (id, scope, project_id, kind, text, actor, status, created_at, updated_at)\n\
+                 VALUES ('collide-0000-aaaa-bbbb', 'global', NULL, 'fact', 'forced duplicate', 'agent', 'active', 1, 1)",
+                [],
+            )
+            .expect("insert forced duplicate");
+        drop(user);
+        let error = super::routed_resolve_memory(&router, None, "collide-0000-aaaa-bbbb")
+            .expect_err("duplicate exact ID across stores must fail");
+        assert!(
+            format!("{error:#}").contains("ambiguous memory ID"),
+            "unexpected error: {error:#}"
+        );
+
+        // Remove the duplicate: the surviving exact ID resolves in its
+        // owning store.
+        let user = router.write_store(None).expect("user store");
+        user.connection
+            .execute(
+                "DELETE FROM memories WHERE id = 'collide-0000-aaaa-bbbb' AND project_id IS NULL",
+                [],
+            )
+            .expect("remove forced duplicate");
+        drop(user);
         let (store, id) = super::routed_resolve_memory(&router, None, "collide-0000-aaaa-bbbb")
             .expect("resolve exact id");
         assert_eq!(id, "collide-0000-aaaa-bbbb");

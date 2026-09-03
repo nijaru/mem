@@ -47,9 +47,6 @@ impl Store {
             params![model, project_id],
             |row| row.get(0),
         )?;
-        if covered == 0 {
-            return Ok(false);
-        }
         let visible: i64 = self.connection.query_row(
             "SELECT COUNT(*)
              FROM memories AS m
@@ -58,6 +55,10 @@ impl Store {
             params![project_id],
             |row| row.get(0),
         )?;
+        // A scope with no active visible memories is vacuously covered;
+        // treating it as incomplete would let one empty store in a routed
+        // scope (an empty user store beside a fully indexed project store)
+        // veto semantic recall for the entire scope.
         Ok(covered == visible)
     }
 
@@ -288,17 +289,25 @@ mod tests {
         let _alpha = remember(&mut store, "alpha candidate", Some("alpha"));
         let _beta = remember(&mut store, "beta candidate", Some("beta"));
 
-        // Empty scope: no vectors, no active visible rows -> no semantic mode.
+        // Empty scope: visible memories exist but none carry vectors ->
+        // no semantic mode.
         assert!(
             !store
+                .has_complete_scope_coverage("prod-model", Some("gamma"))
+                .expect("gate unseen project with no memories")
+        );
+        // A scope with zero active visible memories is vacuously covered;
+        // an empty store must never veto semantic recall for a routed scope
+        // (an empty user store beside a fully indexed project store).
+        let empty_path = test_path();
+        let empty = Store::open(&empty_path).expect("open empty store");
+        assert!(
+            empty
                 .has_complete_scope_coverage("prod-model", None)
-                .expect("gate global empty")
+                .expect("gate empty store")
         );
-        assert!(
-            !store
-                .has_complete_scope_coverage("prod-model", Some("alpha"))
-                .expect("gate alpha empty")
-        );
+        drop(empty);
+        cleanup(&empty_path);
 
         // Embed each memory through the queue protocol with production-model
         // vectors.
