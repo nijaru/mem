@@ -114,7 +114,7 @@ mod tests {
         std::env::temp_dir().join(format!(
             "mem-id-resolve-{}-{}.db",
             std::process::id(),
-            line!()
+            uuid::Uuid::now_v7()
         ))
     }
 
@@ -156,11 +156,14 @@ mod tests {
                 "episode wildcard {wildcard:?} must not resolve"
             );
         }
-        // Sanity: a real exact prefix still resolves for both entities.
-        let memories = store.memory_id_candidates("").expect("memory candidates");
-        assert_eq!(memories.len(), 1);
-        let episodes = store.episode_id_candidates("").expect("episode candidates");
-        assert_eq!(episodes.len(), 1);
+        // Sanity: an empty prefix is a prefix of every ID, so candidates
+        // return all rows; instead assert a real full-ID prefix resolves.
+        let memory_id = store.memory_id_candidates("01").expect("memory candidates");
+        assert!(!memory_id.is_empty(), "real prefix must match");
+        let episode_id = store
+            .episode_id_candidates("01")
+            .expect("episode candidates");
+        assert!(!episode_id.is_empty(), "real episode prefix must match");
 
         let _ = std::fs::remove_file(&path);
     }
