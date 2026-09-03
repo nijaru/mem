@@ -1,6 +1,7 @@
 mod embedding;
 mod embedding_worker;
 mod episode;
+mod id_resolve;
 mod index_job;
 mod project;
 mod storage;

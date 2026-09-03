@@ -252,7 +252,7 @@ impl Store {
         project_id: Option<&str>,
         limit: usize,
     ) -> Result<Vec<HistoryHit>> {
-        let query = fts_query(query)?;
+        let query = crate::id_resolve::fts_query(query)?;
         let limit = i64::try_from(limit)?;
         let mut hits = Vec::new();
 
@@ -326,63 +326,6 @@ impl Store {
             [id],
             episode_entry_from_row,
         )?)
-    }
-
-    /// Candidate episode IDs matching an exact ID or prefix. Used by routed
-    /// resolution, which must see every store's matches to enforce
-    /// cross-store uniqueness.
-    pub fn episode_id_candidates(&self, id_or_prefix: &str) -> Result<Vec<String>> {
-        let candidate = id_or_prefix.trim();
-        let prefix = format!("{}%", crate::store::escape_like_for_prefix(candidate));
-        let mut statement = self.connection.prepare(
-            "SELECT id\n\
-             FROM episodes\n\
-             WHERE id = ?1 OR id LIKE ?2 ESCAPE '\\'\n\
-             ORDER BY CASE WHEN id = ?1 THEN 0 ELSE 1 END, id\n\
-             LIMIT 3",
-        )?;
-        let rows =
-            statement.query_map(params![candidate, prefix], |row| row.get::<_, String>(0))?;
-        let ids = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(ids)
-    }
-
-    fn resolve_episode_id(&self, id_or_prefix: &str) -> Result<String> {
-        let candidate = id_or_prefix.trim();
-        if candidate.is_empty() {
-            bail!("episode ID cannot be empty");
-        }
-
-        // An exact ID always resolves, even when it is also a prefix of other
-        // IDs; only genuine prefix lookups can be ambiguous.
-        if let Some(id) = self
-            .connection
-            .query_row(
-                "SELECT id FROM episodes WHERE id = ?1",
-                [candidate],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?
-        {
-            return Ok(id);
-        }
-
-        let prefix = format!("{candidate}%");
-        let mut statement = self.connection.prepare(
-            "SELECT id\n\
-             FROM episodes\n\
-             WHERE id = ?1 OR id LIKE ?2\n\
-             ORDER BY CASE WHEN id = ?1 THEN 0 ELSE 1 END, id\n\
-             LIMIT 2",
-        )?;
-        let rows =
-            statement.query_map(params![candidate, prefix], |row| row.get::<_, String>(0))?;
-        let ids: Vec<String> = rows.collect::<rusqlite::Result<_>>()?;
-        match ids.as_slice() {
-            [] => bail!("episode not found: {candidate}"),
-            [id] => Ok(id.clone()),
-            _ => bail!("ambiguous episode ID prefix: {candidate}"),
-        }
     }
 }
 
@@ -473,21 +416,6 @@ fn history_hit_from_row(row: &Row<'_>) -> rusqlite::Result<HistoryHit> {
         occurred_at: row.get(11)?,
         rank: row.get(12)?,
     })
-}
-
-/// History search ranks with bm25 across all query terms (OR matching),
-/// so partial term matches stay visible and rank below full matches
-/// instead of being discarded — the same ranked-visibility contract as
-/// memory search.
-fn fts_query(input: &str) -> Result<String> {
-    let terms: Vec<String> = input
-        .split_whitespace()
-        .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
-        .collect();
-    if terms.is_empty() {
-        bail!("history query cannot be empty");
-    }
-    Ok(terms.join(" OR "))
 }
 
 fn unix_millis() -> Result<i64> {

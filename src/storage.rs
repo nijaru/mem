@@ -1,8 +1,6 @@
 //! Managed storage layout: per-project SQLite routing with safe path
 //! encoding. Exact-file operation (`--db`/`MEM_DB`) bypasses this entirely.
 
-#![allow(dead_code)]
-
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -285,6 +283,8 @@ impl StorageRouter {
         Ok(Self::Managed(ManagedLayout::resolve()?))
     }
 
+    /// Test-only constructor against an explicit managed root.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn managed_at(home: PathBuf) -> Self {
         Self::Managed(ManagedLayout::at(home))
     }

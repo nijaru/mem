@@ -264,7 +264,7 @@ impl Store {
         id_or_prefix: &str,
         input: NewCorrection,
     ) -> Result<CorrectionResult> {
-        let previous_id = self.resolve_id(id_or_prefix)?;
+        let previous_id = self.resolve_memory_id(id_or_prefix)?;
         let previous = self.memory_by_id(&previous_id)?;
         if previous.status != "active" {
             bail!(
@@ -341,7 +341,7 @@ impl Store {
         project_id: Option<&str>,
         limit: usize,
     ) -> Result<Vec<SearchHit>> {
-        self.search_fts(&fts_query(query, " OR ")?, project_id, limit)
+        self.search_fts(&crate::id_resolve::fts_query(query)?, project_id, limit)
     }
 
     /// Broad lexical recall used by `mem context` when semantic ranking is
@@ -352,11 +352,11 @@ impl Store {
         project_id: Option<&str>,
         limit: usize,
     ) -> Result<Vec<SearchHit>> {
-        self.search_fts(&fts_query(query, " OR ")?, project_id, limit)
+        self.search_fts(&crate::id_resolve::fts_query(query)?, project_id, limit)
     }
 
     pub fn get(&self, id_or_prefix: &str) -> Result<MemoryRecord> {
-        let id = self.resolve_id(id_or_prefix)?;
+        let id = self.resolve_memory_id(id_or_prefix)?;
         let memory = self.memory_by_id(&id)?;
 
         let mut source_statement = self.connection.prepare(
@@ -406,7 +406,7 @@ impl Store {
     }
 
     pub fn forget(&self, id_or_prefix: &str) -> Result<String> {
-        let id = self.resolve_id(id_or_prefix)?;
+        let id = self.resolve_memory_id(id_or_prefix)?;
         let now = unix_millis()?;
         self.connection.execute(
             "UPDATE memories\n\
@@ -651,64 +651,6 @@ impl Store {
             memory_from_row,
         )?)
     }
-
-    /// Candidate IDs matching an exact ID or prefix. Used by routed
-    /// resolution, which must see every store's matches to enforce
-    /// cross-store uniqueness.
-    pub fn memory_id_candidates(&self, id_or_prefix: &str) -> Result<Vec<String>> {
-        let candidate = id_or_prefix.trim();
-        let prefix = format!("{}%", escape_like_for_prefix(candidate));
-        let mut statement = self.connection.prepare(
-            "SELECT id\n\
-             FROM memories\n\
-             WHERE id = ?1 OR id LIKE ?2 ESCAPE '\\'\n\
-             ORDER BY CASE WHEN id = ?1 THEN 0 ELSE 1 END, id\n\
-             LIMIT 3",
-        )?;
-        let rows =
-            statement.query_map(params![candidate, prefix], |row| row.get::<_, String>(0))?;
-        let ids = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(ids)
-    }
-
-    fn resolve_id(&self, id_or_prefix: &str) -> Result<String> {
-        let candidate = id_or_prefix.trim();
-        if candidate.is_empty() {
-            bail!("memory ID cannot be empty");
-        }
-
-        // An exact ID always resolves, even when it is also a prefix of other
-        // IDs; only genuine prefix lookups can be ambiguous.
-        if let Some(id) = self
-            .connection
-            .query_row(
-                "SELECT id FROM memories WHERE id = ?1",
-                [candidate],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?
-        {
-            return Ok(id);
-        }
-
-        let prefix = format!("{}%", escape_like_for_prefix(candidate));
-        let mut statement = self.connection.prepare(
-            "SELECT id\n\
-             FROM memories\n\
-             WHERE id = ?1 OR id LIKE ?2 ESCAPE '\\'\n\
-             ORDER BY CASE WHEN id = ?1 THEN 0 ELSE 1 END, id\n\
-             LIMIT 2",
-        )?;
-        let rows =
-            statement.query_map(params![candidate, prefix], |row| row.get::<_, String>(0))?;
-        let ids: Vec<String> = rows.collect::<rusqlite::Result<_>>()?;
-
-        match ids.as_slice() {
-            [] => bail!("memory not found: {candidate}"),
-            [id] => Ok(id.clone()),
-            _ => bail!("ambiguous memory ID prefix: {candidate}"),
-        }
-    }
 }
 
 fn insert_memory(
@@ -842,31 +784,9 @@ fn workspace_state_from_row(row: &Row<'_>) -> rusqlite::Result<WorkspaceState> {
     })
 }
 
-fn fts_query(input: &str, operator: &str) -> Result<String> {
-    let terms: Vec<String> = input
-        .split_whitespace()
-        .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
-        .collect();
-    if terms.is_empty() {
-        bail!("search query cannot be empty");
-    }
-    Ok(terms.join(operator))
-}
-
 /// Escape SQL LIKE wildcards (`_`, `%`, and the escape character itself)
 /// so an ID-prefix candidate matches literally instead of any character.
 /// Shared by memory and episode ID prefix resolution.
-pub(crate) fn escape_like_for_prefix(input: &str) -> String {
-    let mut escaped = String::with_capacity(input.len());
-    for character in input.chars() {
-        if matches!(character, '_' | '%' | '\\') {
-            escaped.push('\\');
-        }
-        escaped.push(character);
-    }
-    escaped
-}
-
 /// Memory text can hold credentials and internal paths, so created stores
 /// and their directories are private to the current user. Only creations are
 /// restricted; existing paths keep whatever the user or umask chose.
