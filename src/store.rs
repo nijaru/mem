@@ -784,9 +784,6 @@ fn workspace_state_from_row(row: &Row<'_>) -> rusqlite::Result<WorkspaceState> {
     })
 }
 
-/// Escape SQL LIKE wildcards (`_`, `%`, and the escape character itself)
-/// so an ID-prefix candidate matches literally instead of any character.
-/// Shared by memory and episode ID prefix resolution.
 /// Memory text can hold credentials and internal paths, so created stores
 /// and their directories are private to the current user. Only creations are
 /// restricted; existing paths keep whatever the user or umask chose.

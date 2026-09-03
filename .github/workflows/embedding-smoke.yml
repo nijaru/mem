@@ -9,7 +9,9 @@ on:
       - Cargo.toml
       - src/embedding.rs
       - src/embedding_worker.rs
+      - src/id_resolve.rs
       - src/main.rs
+      - src/storage.rs
       - src/vector_search.rs
 
 permissions:
