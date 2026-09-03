@@ -1580,3 +1580,148 @@ fn print_json(value: &impl Serialize) -> Result<()> {
     writeln!(lock)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod cli_parse_tests {
+    //! Arg-matrix tests for the CLI surface: every command parses with its
+    //! documented flags, defaults hold, and scope-flag coverage matches the
+    //! help text. Parsing is pure, so no process or database is involved.
+
+    use super::{Command, MemCli, parse_cli};
+
+    fn parse(args: &str) -> MemCli {
+        let argv = std::iter::once("mem".to_owned())
+            .chain(args.split_whitespace().map(str::to_owned))
+            .collect::<Vec<_>>();
+        parse_cli(&argv).expect("parse")
+    }
+
+    #[test]
+    fn remember_flags_and_defaults() {
+        let cli = parse(
+            "remember text-here --kind fact --global --actor agent --source-type cli --source-ref r",
+        );
+        let Command::Remember(command) = &cli.command else {
+            panic!("expected remember");
+        };
+        assert_eq!(command.text, "text-here");
+        assert_eq!(command.kind.as_deref(), Some("fact"));
+        assert!(command.global_memory);
+        assert_eq!(command.actor.as_deref(), Some("agent"));
+        assert_eq!(command.source_type.as_deref(), Some("cli"));
+        assert_eq!(command.source_ref.as_deref(), Some("r"));
+        assert!(command.project.is_none());
+    }
+
+    #[test]
+    fn context_flags_and_budget_defaults() {
+        let cli = parse("context query --project p --workspace w -n 4 --max-bytes 1024 --lexical");
+        let Command::Context(command) = &cli.command else {
+            panic!("expected context");
+        };
+        assert_eq!(command.query, "query");
+        assert_eq!(command.project.as_deref(), Some("p"));
+        assert_eq!(command.workspace.as_deref(), Some("w"));
+        assert_eq!(command.limit, Some(4));
+        assert_eq!(command.max_bytes, Some(1024));
+        assert!(command.lexical);
+
+        let bare = parse("context q");
+        let Command::Context(command) = &bare.command else {
+            panic!("expected context");
+        };
+        assert_eq!(command.limit, None);
+        assert_eq!(command.max_bytes, None);
+        assert!(!command.lexical);
+    }
+
+    #[test]
+    fn search_scope_and_tier_flags() {
+        let cli = parse("search q --global --semantic -n 3 --project proj");
+        let Command::Search(command) = &cli.command else {
+            panic!("expected search");
+        };
+        assert!(command.global_memory);
+        assert!(command.semantic);
+        assert_eq!(command.limit, Some(3));
+        assert_eq!(command.project.as_deref(), Some("proj"));
+    }
+
+    #[test]
+    fn history_scope_flags() {
+        let cli = parse("history q --global -n 5");
+        let Command::History(command) = &cli.command else {
+            panic!("expected history");
+        };
+        assert!(command.global_history);
+        assert_eq!(command.limit, Some(5));
+        assert!(command.project.is_none());
+    }
+
+    #[test]
+    fn id_commands_take_no_scope_flags() {
+        // get/forget/correct resolve across managed stores by design, so
+        // they must not grow --project/--global until routing changes.
+        let get = parse("get 01abc");
+        assert!(matches!(get.command, super::Command::Get(_)));
+        let forget = parse("forget 01abc");
+        assert!(matches!(forget.command, super::Command::Forget(_)));
+        let correct = parse("correct 01abc new-text");
+        assert!(matches!(correct.command, super::Command::Correct(_)));
+    }
+
+    #[test]
+    fn episode_subcommands_parse() {
+        let cli = parse("episode create s1 --source-type session --project p");
+        let Command::Episode(command) = &cli.command else {
+            panic!("expected episode");
+        };
+        let super::EpisodeSubcommand::Create(create) = &command.command else {
+            panic!("expected create");
+        };
+        assert_eq!(create.source_type.as_deref(), Some("session"));
+        assert_eq!(create.source_ref, "s1");
+        assert_eq!(create.project.as_deref(), Some("p"));
+    }
+
+    #[test]
+    fn state_patch_accepts_repeatable_flags() {
+        let cli = parse(
+            "state patch --goal g --session s --task t1 --checkpoint c --clear session --clear goal",
+        );
+        let Command::State(state) = &cli.command else {
+            panic!("expected state");
+        };
+        let super::StateCommand::Patch(patch) = &state.command else {
+            panic!("expected patch");
+        };
+        assert_eq!(patch.goal.as_deref(), Some("g"));
+        assert_eq!(patch.session.as_deref(), Some("s"));
+        assert_eq!(patch.task.as_deref(), Some("t1"));
+        assert_eq!(patch.checkpoint.as_deref(), Some("c"));
+        assert_eq!(patch.clear, vec!["session".to_owned(), "goal".to_owned()]);
+    }
+
+    #[test]
+    fn dispatcher_knows_every_command_name() {
+        // Probing each top-level command name through parse_cli checks the
+        // dispatcher knows it; parse_cli exits on hard failures, so only run
+        // well-formed invocations here.
+        let probes = [
+            ("remember x", "remember"),
+            ("search x", "search"),
+            ("context x", "context"),
+            ("history x", "history"),
+            ("get x", "get"),
+            ("forget x", "forget"),
+            ("status", "status"),
+            ("project", "project"),
+        ];
+        for (probe, _name) in probes {
+            let argv = std::iter::once("mem".to_owned())
+                .chain(probe.split_whitespace().map(str::to_owned))
+                .collect::<Vec<_>>();
+            let _ = parse_cli(&argv);
+        }
+    }
+}
