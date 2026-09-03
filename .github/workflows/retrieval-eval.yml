@@ -8,6 +8,7 @@ on:
       - .github/workflows/retrieval-eval.yml
       - tests/retrieval_eval.rs
       - tests/real_corpus_eval.rs
+      - tests/heldout_eval.rs
       - Cargo.toml
       - src/embedding.rs
       - src/embedding_worker.rs
@@ -38,3 +39,5 @@ jobs:
         run: cargo test --test retrieval_eval -- --ignored --nocapture
       - name: Run real-corpus retrieval evaluation
         run: cargo test --test real_corpus_eval -- --ignored --nocapture
+      - name: Run held-out retrieval evaluation
+        run: cargo test --test heldout_eval -- --ignored --nocapture
