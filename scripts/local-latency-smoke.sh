@@ -38,7 +38,7 @@ time "$mem_bin" --db "$db" index run -n 4
 
 query="how do multiple checkouts avoid overwriting the point an agent should resume from?"
 
-printf '\n== lexical AND control (expected to miss or be weak) ==\n'
+printf '\n== lexical ranked-OR control (partial matches stay visible) ==\n'
 "$mem_bin" --db "$db" search "$query" --global -n 4 || true
 
 for run in 1 2 3; do

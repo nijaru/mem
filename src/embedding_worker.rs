@@ -512,12 +512,16 @@ mod tests {
             })
             .expect("store second memory");
         // Direct canonical text refresh so claimed jobs must resolve only the
-        // current text — the path the source-resolution guards.
+        // current text — the path the source-resolution guards. Note: no
+        // artificial updated_at bump here. The trigger stamps the requeued
+        // job's available_at from new.updated_at, and claiming filters on
+        // available_at <= now; a +1 bump would land the job 1ms in the
+        // future and make this claim flake on same-millisecond runs.
         store
             .connection
             .execute(
                 "UPDATE memories\n\
-                 SET text = 'refreshed second text', updated_at = updated_at + 1 WHERE id = ?1",
+                 SET text = 'refreshed second text' WHERE id = ?1",
                 rusqlite::params![&second.id],
             )
             .expect("refresh canonical text");
