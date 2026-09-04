@@ -30,30 +30,21 @@ jobs:
 
           main = Path("src/main.rs")
           text = main.read_text()
-          needle = "const RECALL_DEFAULT_MAX_BYTES: usize = 32 * 1024;\n"
-          assert needle in text
+          budget = "const RECALL_DEFAULT_MAX_BYTES: usize = 32 * 1024;\n"
+          assert budget in text
           text = text.replace(
-              needle,
-              needle + "\n/// Minimum cosine similarity for automatic semantic context recall.\n/// Calibrated against project-realistic positives and unrelated queries.\nconst SEMANTIC_CONTEXT_MIN_SCORE: f64 = 0.55;\n",
+              budget,
+              budget + "\n/// Minimum cosine similarity for automatic semantic context recall.\n/// Calibrated against project-realistic positives and unrelated queries.\nconst SEMANTIC_CONTEXT_MIN_SCORE: f64 = 0.55;\n",
               1,
           )
-          old = """        return Ok(hits
-            .into_iter()
-            .map(|hit| SearchHit {
-                memory: hit.memory,
-                rank: hit.score,
-            })
-            .collect());"""
-          new = """        return Ok(hits
-            .into_iter()
-            .filter(|hit| hit.score >= SEMANTIC_CONTEXT_MIN_SCORE)
-            .map(|hit| SearchHit {
-                memory: hit.memory,
-                rank: hit.score,
-            })
-            .collect());"""
-          assert old in text
-          main.write_text(text.replace(old, new, 1))
+          iterator = "        return Ok(hits\n            .into_iter()\n"
+          assert iterator in text
+          text = text.replace(
+              iterator,
+              iterator + "            .filter(|hit| hit.score >= SEMANTIC_CONTEXT_MIN_SCORE)\n",
+              1,
+          )
+          main.write_text(text)
 
           heldout = Path("tests/heldout_eval.rs")
           text = heldout.read_text()
