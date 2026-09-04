@@ -4,7 +4,7 @@
 
 ## Core model
 
-Each project owns one SQLite database at `.mem/mem.db`. Memories are concise durable facts, findings, decisions, constraints, preferences, and procedures. Each memory carries lightweight provenance (`actor`, `source_type`, and optional `source_ref`). Corrections preserve the old record as `superseded` and point it at the replacement.
+Each Git project owns one SQLite database at the repository-root `.mem/mem.db`. Memories are concise durable facts, findings, decisions, constraints, preferences, and procedures. Each memory carries lightweight provenance (`actor`, `source_type`, and optional `source_ref`). Corrections preserve the old record as `superseded` and point it at the replacement.
 
 Continuation state is separate: one compact resume cursor per workspace, normally the current Git branch or detached commit.
 

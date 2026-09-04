@@ -146,3 +146,40 @@ fn git_repo_root_is_default_project_boundary() {
     );
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn nested_mem_directory_does_not_shadow_git_root_store() {
+    let root = temp_dir();
+    let git = Command::new("git")
+        .args(["init", "-q", root.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(git.status.success());
+    assert!(run(&root, &["init"]).status.success());
+
+    let nested = root.join("src/deep");
+    std::fs::create_dir_all(nested.join(".mem")).unwrap();
+    let value = run_json(&nested, &["status"]);
+    assert_eq!(
+        value["database"],
+        root.join(".mem/mem.db").display().to_string()
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn context_max_bytes_is_a_hard_bound() {
+    let cwd = temp_dir();
+    run_json(
+        &cwd,
+        &[
+            "remember",
+            "oversized memory payload",
+            "--source-type",
+            "test",
+        ],
+    );
+    let value = run_json(&cwd, &["context", "oversized", "--max-bytes", "4"]);
+    assert_eq!(value["memories"].as_array().map(Vec::len), Some(0));
+    std::fs::remove_dir_all(cwd).unwrap();
+}

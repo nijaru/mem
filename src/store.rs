@@ -255,10 +255,6 @@ impl Store {
         self.search_fts(&crate::id_resolve::fts_query(query)?, limit)
     }
 
-    pub fn recall(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
-        self.search_fts(&crate::id_resolve::fts_query(query)?, limit)
-    }
-
     pub fn get(&self, id_or_prefix: &str) -> Result<Memory> {
         let id = self.resolve_memory_id(id_or_prefix)?;
         self.memory_by_id(&id)

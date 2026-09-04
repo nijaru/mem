@@ -390,8 +390,8 @@ fn run(cli: MemCli) -> Result<()> {
             let mut total = 0usize;
             for hit in hits {
                 let bytes = hit.memory.text.len();
-                if max_bytes > 0 && !memories.is_empty() && total + bytes > max_bytes {
-                    break;
+                if max_bytes > 0 && total + bytes > max_bytes {
+                    continue;
                 }
                 total += bytes;
                 memories.push(hit.memory);
@@ -549,7 +549,7 @@ pub fn recall_hits(store: &Store, query: &str, limit: usize) -> Result<Vec<Searc
             })
             .collect());
     }
-    store.recall(query, limit)
+    store.search(query, limit)
 }
 
 fn cached_query_vector(query: &str) -> Result<Option<Vec<f32>>> {
@@ -697,15 +697,6 @@ fn database_path(override_path: Option<&Path>) -> Result<PathBuf> {
 
     let cwd = std::env::current_dir().context("determine current directory")?;
     if let Some(root) = crate::workspace::repo_root() {
-        for ancestor in cwd.ancestors() {
-            let mem_dir = ancestor.join(".mem");
-            if mem_dir.is_dir() {
-                return Ok(mem_dir.join("mem.db"));
-            }
-            if ancestor == root {
-                break;
-            }
-        }
         return Ok(root.join(".mem").join("mem.db"));
     }
     for ancestor in cwd.ancestors() {
