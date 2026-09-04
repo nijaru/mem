@@ -7,7 +7,10 @@ use uuid::Uuid;
 fn temp_dir() -> PathBuf {
     let path = std::env::temp_dir().join(format!("mem-repo-local-{}", Uuid::now_v7()));
     std::fs::create_dir_all(&path).expect("create temp dir");
-    path
+    // Canonicalize so expectations match the git-reported repo root: on macOS
+    // the OS temp dir is /var/... while git resolves the same directory as
+    // /private/var/...
+    std::fs::canonicalize(&path).expect("canonicalize temp dir")
 }
 
 fn command(cwd: &Path) -> Command {
