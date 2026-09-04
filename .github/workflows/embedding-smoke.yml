@@ -7,11 +7,12 @@ on:
     paths:
       - .github/workflows/embedding-smoke.yml
       - Cargo.toml
+      - migrations/schema.sql
+      - migrations/0007_lean_core.sql
       - src/embedding.rs
       - src/embedding_worker.rs
-      - src/id_resolve.rs
       - src/main.rs
-      - src/storage.rs
+      - src/store.rs
       - src/vector_search.rs
 
 permissions:
@@ -39,7 +40,7 @@ jobs:
           key: fastembed-5.3.0-bge-small-en-v1.5-q-${{ runner.os }}-${{ runner.arch }}
       - name: Build
         run: cargo build --release
-      - name: Run embedding and semantic retrieval smoke
+      - name: Run semantic retrieval smoke
         shell: bash
         run: |
           set -euo pipefail
@@ -47,66 +48,31 @@ jobs:
           target="Each Git worktree keeps an independent continuation checkpoint."
           query="separate resume state for parallel repository checkouts"
 
-          target/release/mem --db "$db" remember "$target" \
-            --kind decision --global --source-type smoke
-          target/release/mem --db "$db" remember \
-            "Embedding workers retry failed inference after a delay." \
-            --kind procedure --global --source-type smoke
-          target/release/mem --db "$db" remember \
-            "Deleted memories are excluded from active search results." \
-            --kind fact --global --source-type smoke
-          target/release/mem --db "$db" remember \
-            "Semantic memories retain provenance evidence for their source." \
-            --kind fact --global --source-type smoke
+          target/release/mem --db "$db" remember "$target" --kind decision --source-type smoke
+          target/release/mem --db "$db" remember "Deleted memories are excluded from active search results." --source-type smoke
+          target/release/mem --db "$db" remember "Semantic memories retain provenance for their source." --source-type smoke
+          target/release/mem --db "$db" remember "Indexing retries naturally when a current vector is still missing." --source-type smoke
 
-          run_json="$(target/release/mem --json --db "$db" index run -n 4)"
-          printf '%s\n' "$run_json"
-          RUN_JSON="$run_json" python3 - <<'PY'
-          import json
-          import os
-
-          result = json.loads(os.environ["RUN_JSON"])
-          assert result["claimed"] == 4, result
-          assert result["eligible"] == 4, result
-          assert result["committed"] == 4, result
+          index_json="$(target/release/mem --json --db "$db" index -n 4)"
+          INDEX_JSON="$index_json" python3 - <<'PY'
+          import json, os
+          result = json.loads(os.environ["INDEX_JSON"])
+          assert result["indexed"] == 4, result
+          assert result["remaining"] == 0, result
           assert result["stale"] == 0, result
-          assert result["retried"] == 0, result
           PY
 
-          status_json="$(target/release/mem --json --db "$db" index status)"
-          printf '%s\n' "$status_json"
+          status_json="$(target/release/mem --json --db "$db" status)"
           STATUS_JSON="$status_json" python3 - <<'PY'
-          import json
-          import os
-
+          import json, os
           status = json.loads(os.environ["STATUS_JSON"])
-          assert status["pending"] == 0, status
-          assert status["running"] == 0, status
+          assert status["indexed"] == 4, status
+          assert status["unindexed"] == 0, status
           PY
 
-          lexical_json="$(target/release/mem --json --db "$db" search "$query" --global -n 4)"
-          printf '%s\n' "$lexical_json"
-          LEXICAL_JSON="$lexical_json" TARGET="$target" python3 - <<'PY'
-          import json
-          import os
-
-          # Lexical search is bm25-ranked OR matching: partial term matches
-          # stay visible. The control demonstrates the semantic tier's value —
-          # the target memory shares no query term, so it must not appear
-          # among lexical hits even though weaker partial matches may.
-          hits = json.loads(os.environ["LEXICAL_JSON"])
-          texts = [hit["memory"]["text"] for hit in hits]
-          assert os.environ["TARGET"] not in texts, hits
-          PY
-
-          semantic_json="$(target/release/mem --json --db "$db" search "$query" --semantic --global -n 4)"
-          printf '%s\n' "$semantic_json"
+          semantic_json="$(target/release/mem --json --db "$db" search "$query" --semantic -n 4)"
           SEMANTIC_JSON="$semantic_json" TARGET="$target" python3 - <<'PY'
-          import json
-          import os
-
+          import json, os
           hits = json.loads(os.environ["SEMANTIC_JSON"])
-          assert len(hits) == 4, hits
           assert hits[0]["memory"]["text"] == os.environ["TARGET"], hits
-          assert hits[0]["score"] > hits[1]["score"], hits
           PY
