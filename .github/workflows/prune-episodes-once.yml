@@ -34,104 +34,55 @@ jobs:
           text = text.replace('mod episode;\n', '')
           text = text.replace('use crate::episode::{NewEpisode, NewEpisodeEntry};\n', '')
           text = text.replace('    Episode(EpisodeCommand),\n    History(History),\n', '')
-          text = text.replace(
-              '        Command::Episode(episode) => !matches!(&episode.command, EpisodeSubcommand::Get(_)),\n',
-              '',
-          )
+          text = text.replace('        Command::Episode(episode) => !matches!(&episode.command, EpisodeSubcommand::Get(_)),\n', '')
+          text, n = re.subn(r'\n/// Record and inspect episodic source history\..*?\n/// Operate the durable derived-index work queue\.', '\n/// Operate the durable derived-index work queue.', text, count=1, flags=re.S)
+          assert n == 1
+          text, n = re.subn(r'\n        Command::Episode\(command\) => match command\.command \{.*?\n        Command::Index\(command\) => match command\.command \{', '\n        Command::Index(command) => match command.command {', text, count=1, flags=re.S)
+          assert n == 1
+          text, n = re.subn(r'\nfn episode_context\(.*?\n\}\n\nfn memory_project', '\nfn memory_project', text, count=1, flags=re.S)
+          assert n == 1
+          text, n = re.subn(r'\nfn print_episode\(.*?\n\}\n\nfn print_workspace_state', '\nfn print_workspace_state', text, count=1, flags=re.S)
+          assert n == 1
 
-          text, n = re.subn(
-              r'\n/// Record and inspect episodic source history\..*?\n/// Operate the durable derived-index work queue\.',
-              '\n/// Operate the durable derived-index work queue.', text, count=1, flags=re.S)
-          assert n == 1, f'episode CLI type block removal: {n}'
-          text, n = re.subn(
-              r'\n        Command::Episode\(command\) => match command\.command \{.*?\n        Command::Index\(command\) => match command\.command \{',
-              '\n        Command::Index(command) => match command.command {', text, count=1, flags=re.S)
-          assert n == 1, f'episode/history dispatch removal: {n}'
-          text, n = re.subn(
-              r'\nfn episode_context\(.*?\n\}\n\nfn memory_project',
-              '\nfn memory_project', text, count=1, flags=re.S)
-          assert n == 1, f'episode_context removal: {n}'
-          text, n = re.subn(
-              r'\nfn print_episode\(.*?\n\}\n\nfn print_workspace_state',
-              '\nfn print_workspace_state', text, count=1, flags=re.S)
-          assert n == 1, f'print_episode removal: {n}'
-
+          # Remove standalone parser tests that mention the deleted CLI surface.
           test_fn = re.compile(r'\n    #\[test\]\n    fn [A-Za-z0-9_]+\(\) \{.*?\n    \}', re.S)
-          chunks, last = [], 0
+          out, last = [], 0
           for m in test_fn.finditer(text):
               body = m.group(0)
-              if ('Episode' in body or 'History' in body or 'episode ' in body or 'history ' in body):
-                  chunks.append(text[last:m.start()])
+              if 'Episode' in body or 'History' in body or 'episode ' in body or 'history ' in body:
+                  out.append(text[last:m.start()])
                   last = m.end()
-          if chunks:
-              chunks.append(text[last:])
-              text = ''.join(chunks)
+          if out:
+              out.append(text[last:])
+              text = ''.join(out)
           path.write_text(text)
 
           path = Path('src/storage.rs')
           text = path.read_text().replace('use crate::episode::HistoryHit;\n', '')
-          text, n = re.subn(
-              r'\npub fn routed_resolve_episode\(.*?\n\}\n\nfn resolve_id',
-              '\nfn resolve_id', text, count=1, flags=re.S)
+          text, n = re.subn(r'\npub fn routed_resolve_episode\(.*?\n\}\n\nfn resolve_id', '\nfn resolve_id', text, count=1, flags=re.S)
           assert n == 1
-          text, n = re.subn(
-              r'\npub fn routed_history_search\(.*?\n\}\n\npub fn routed_workspace_state',
-              '\npub fn routed_workspace_state', text, count=1, flags=re.S)
+          text, n = re.subn(r'\npub fn routed_history_search\(.*?\n\}\n\npub fn routed_workspace_state', '\npub fn routed_workspace_state', text, count=1, flags=re.S)
           assert n == 1
           path.write_text(text)
 
           path = Path('src/id_resolve.rs')
           text = path.read_text()
-          text = text.replace(
-              '//! One implementation so memories and episodes cannot drift apart on the\n//! same rules — the duplicated builders previously produced paired defects\n//! (unescaped LIKE prefixes, divergent AND/OR joining).\n',
-              '//! Memory ID prefix resolution and FTS query construction share the same\n//! literal-prefix escaping rules.\n')
-          text, n = re.subn(
-              r'\n    /// Episode IDs matching an exact ID or prefix, for routed resolution\..*?\n    \}\n',
-              '\n', text, count=1, flags=re.S)
+          text = text.replace('//! One implementation so memories and episodes cannot drift apart on the\n//! same rules — the duplicated builders previously produced paired defects\n//! (unescaped LIKE prefixes, divergent AND/OR joining).\n', '//! Memory ID prefix resolution and FTS query construction share the same\n//! literal-prefix escaping rules.\n')
+          text, n = re.subn(r'\n    /// Episode IDs matching an exact ID or prefix, for routed resolution\..*?\n    \}\n', '\n', text, count=1, flags=re.S)
           assert n == 1
-          text, n = re.subn(
-              r'\n    pub\(crate\) fn resolve_episode_id\(.*?\n    \}\n',
-              '\n', text, count=1, flags=re.S)
+          text, n = re.subn(r'\n    pub\(crate\) fn resolve_episode_id\(.*?\n    \}\n', '\n', text, count=1, flags=re.S)
           assert n == 1
-
-          replacement = r'''    #[test]
-    fn wildcards_in_memory_prefixes_match_literally() {
-        let path = test_path();
-        let mut store = Store::open(&path).expect("open store");
-        store
-            .remember(super::super::store::NewMemory {
-                text: "literal wildcard memory".to_owned(),
-                kind: "fact".to_owned(),
-                project_id: None,
-                actor: "agent".to_owned(),
-                source_type: "test".to_owned(),
-                source_ref: None,
-            })
-            .expect("seed memory");
-
-        for wildcard in ["_", "%", "\\"] {
-            assert!(
-                store.get(wildcard).is_err(),
-                "memory wildcard {wildcard:?} must not resolve"
-            );
-        }
-        let ids = store.memory_id_candidates("01").expect("memory candidates");
-        assert!(!ids.is_empty(), "real prefix must match");
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn exact_id_wins_over_ambiguity'''
-          text, n = re.subn(
-              r'    #\[test\]\n    fn wildcards_in_prefixes_match_literally_for_both_entities\(\) \{.*?\n    \}\n\n    #\[test\]\n    fn exact_id_wins_over_ambiguity',
-              lambda _: replacement, text, count=1, flags=re.S)
-          assert n == 1
+          text = text.replace('fn wildcards_in_prefixes_match_literally_for_both_entities()', 'fn wildcards_in_memory_prefixes_match_literally()')
+          text = re.sub(r'        store\n            \.ensure_episode\(.*?            \.expect\("seed episode"\);\n', '', text, count=1, flags=re.S)
+          text = re.sub(r'            assert!\(\n                store\.resolve_episode_id\(wildcard\)\.is_err\(\),\n                "episode wildcard \{wildcard:\?\} must not resolve"\n            \);\n', '', text, count=1)
+          text = re.sub(r'        let episode_id = store\n            \.episode_id_candidates\("01"\)\n            \.expect\("episode candidates"\);\n        assert!\(!episode_id\.is_empty\(\), "real episode prefix must match"\);\n', '', text, count=1)
+          text = text.replace('        // A `_` or `%` in a candidate must not act as a SQL LIKE wildcard —\n        // the defect class where episode resolution drifted from memory\n        // resolution before this module unified them.\n', '        // SQL LIKE wildcard characters in an ID candidate must match literally.\n')
+          text = text.replace('        // Sanity: an empty prefix is a prefix of every ID, so candidates\n        // return all rows; instead assert a real full-ID prefix resolves.\n', '        // Sanity: a real full-ID prefix still resolves.\n')
           path.write_text(text)
           PY
 
           rm src/episode.rs
           ! grep -R "crate::episode\|Command::Episode\|Command::History\|EpisodeSubcommand\|routed_history_search\|routed_resolve_episode\|resolve_episode_id\|episode_id_candidates" src --include='*.rs'
-
           cargo fmt --all
           cargo test --all-targets
           cargo clippy --all-targets -- -D warnings
