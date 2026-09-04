@@ -56,7 +56,11 @@ jobs:
               text = text.replace('index["committed"]', 'index["indexed"]')
               text = text.replace('corrected["replacement"]["memory"]["id"]', 'corrected["replacement"]["id"]')
               start = text.index('fn context_ids')
-              end = text.index('fn lexical_ids', start)
+              candidates = [
+                  text.find('fn lexical_ids', start + 1),
+                  text.find('fn semantic_ids', start + 1),
+              ]
+              end = min(position for position in candidates if position >= 0)
               segment = text[start:end].replace('item["memory"]["id"]', 'item["id"]')
               text = text[:start] + segment + text[end:]
               path.write_text(text)
