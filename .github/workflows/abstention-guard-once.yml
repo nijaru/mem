@@ -12,8 +12,6 @@ permissions:
 jobs:
   apply:
     runs-on: ubuntu-22.04
-    env:
-      MEM_MODEL_CACHE: ${{ github.workspace }}/.model-cache
     steps:
       - uses: actions/checkout@v4
         with:
@@ -23,50 +21,44 @@ jobs:
           toolchain: 1.98.0
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/cache@v4
-        with:
-          path: .model-cache
-          key: fastembed-5.3.0-bge-small-en-v1.5-q-${{ runner.os }}-${{ runner.arch }}
-      - name: Add and verify context abstention guard
+      - name: Patch context precision guard
         shell: bash
         run: |
-          set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
 
-          main = Path('src/main.rs')
+          main = Path("src/main.rs")
           text = main.read_text()
-          needle = 'const RECALL_DEFAULT_MAX_BYTES: usize = 32 * 1024;\n'
+          needle = "const RECALL_DEFAULT_MAX_BYTES: usize = 32 * 1024;\n"
           assert needle in text
           text = text.replace(
               needle,
-              needle + '\n/// Minimum cosine similarity for automatic semantic context recall.\n/// Calibrated against real-project positives and unrelated no-answer probes;\n/// explicit semantic diagnostics remain unfiltered.\nconst SEMANTIC_CONTEXT_MIN_SCORE: f64 = 0.55;\n',
+              needle + "\n/// Minimum cosine similarity for automatic semantic context recall.\n/// Calibrated against project-realistic positives and unrelated queries.\nconst SEMANTIC_CONTEXT_MIN_SCORE: f64 = 0.55;\n",
               1,
           )
-          old = '''        return Ok(hits
+          old = """        return Ok(hits
             .into_iter()
             .map(|hit| SearchHit {
                 memory: hit.memory,
                 rank: hit.score,
             })
-            .collect());'''
-          new = '''        return Ok(hits
+            .collect());"""
+          new = """        return Ok(hits
             .into_iter()
             .filter(|hit| hit.score >= SEMANTIC_CONTEXT_MIN_SCORE)
             .map(|hit| SearchHit {
                 memory: hit.memory,
                 rank: hit.score,
             })
-            .collect());'''
+            .collect());"""
           assert old in text
-          text = text.replace(old, new, 1)
-          main.write_text(text)
+          main.write_text(text.replace(old, new, 1))
 
-          heldout = Path('tests/heldout_eval.rs')
+          heldout = Path("tests/heldout_eval.rs")
           text = heldout.read_text()
-          marker = '#[test]\n#[ignore = "loads the cached embedding model; intended for the retrieval-eval workflow"]\nfn poisoned_high_rank_text_stays_delimited_by_scope_and_status() {'
+          marker = "#[test]\n#[ignore = \"loads the cached embedding model; intended for the retrieval-eval workflow\"]\nfn poisoned_high_rank_text_stays_delimited_by_scope_and_status() {"
           assert marker in text
-          test = r'''#[test]
+          test = '''#[test]
 #[ignore = "loads the cached embedding model; intended for the retrieval-eval workflow"]
 fn context_abstains_on_unrelated_queries_without_losing_heldout_recall() {
     let db = test_path();
@@ -76,10 +68,7 @@ fn context_abstains_on_unrelated_queries_without_losing_heldout_recall() {
 
     for seed in &seeds {
         let output = remember(&db, seed);
-        ids.insert(
-            seed.key,
-            output["id"].as_str().expect("id").to_owned(),
-        );
+        ids.insert(seed.key, output["id"].as_str().expect("id").to_owned());
     }
     run_json(&db, &["index", "run", "-n", "128"]);
 
@@ -119,19 +108,19 @@ fn context_abstains_on_unrelated_queries_without_losing_heldout_recall() {
 }
 
 '''
-          text = text.replace(marker, test + marker, 1)
-          heldout.write_text(text)
+          heldout.write_text(text.replace(marker, test + marker, 1))
           PY
-
+      - name: Verify
+        shell: bash
+        run: |
           cargo fmt --all
           cargo test --all-targets
           cargo clippy --all-targets -- -D warnings
           cargo test --test heldout_eval context_abstains_on_unrelated_queries_without_losing_heldout_recall -- --ignored --nocapture
           git diff --check
-      - name: Commit verified abstention guard
+      - name: Commit verified guard
         shell: bash
         run: |
-          set -euo pipefail
           rm .github/workflows/abstention-guard-once.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
