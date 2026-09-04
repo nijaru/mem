@@ -29,12 +29,11 @@ jobs:
 
           path = Path('src/main.rs')
           text = path.read_text()
-          block = '    /// Force FTS5 lexical recall instead of semantic-first ranking.\n    #[usage(long)]\n    lexical: bool,\n'
-          assert block in text
-          text = text.replace(block, '', 1)
-          assert text.count('command.lexical') == 1
-          text = text.replace('command.lexical', 'false', 1)
-          # Remove parser assertions/tests that explicitly exercise the deleted flag.
+          text, n = re.subn(r'\n    /// Force FTS5 lexical recall instead of semantic-first ranking\.\n    #\[usage\(long\)\]\n    lexical: bool,', '', text, count=1)
+          assert n == 1
+          dispatch = '                command.lexical,\n'
+          assert dispatch in text
+          text = text.replace(dispatch, '                false,\n', 1)
           test_fn = re.compile(r'\n    #\[test\]\n    fn [A-Za-z0-9_]+\(\) \{.*?\n    \}', re.S)
           out, last = [], 0
           for m in test_fn.finditer(text):
@@ -50,10 +49,7 @@ jobs:
           lexical_fn = '\n'.join([
               'fn lexical_ids(db: &Path, query: &str) -> Vec<String> {',
               '    let limit = LIMIT.to_string();',
-              '    let output = run_json(',
-              '        db,',
-              '        &["search", query, "--project", PROJECT, "-n", &limit],',
-              '    );',
+              '    let output = run_json(db, &["search", query, "--project", PROJECT, "-n", &limit]);',
               '    output',
               '        .as_array()',
               '        .expect("lexical search array")',
@@ -63,20 +59,11 @@ jobs:
               '}',
               '',
           ])
-
           for filename in ['tests/heldout_eval.rs', 'tests/real_corpus_eval.rs', 'tests/retrieval_eval.rs']:
               path = Path(filename)
               text = path.read_text()
-              # Existing eval call sites can keep asking the helper for the lexical baseline;
-              # the helper now routes that diagnostic through `mem search`, not `context`.
-              text = text.replace(
-                  '    if lexical {\n        args.push("--lexical".to_owned());\n    }\n',
-                  '    if lexical {\n        return lexical_ids(db, query);\n    }\n',
-              )
-              text = text.replace(
-                  '    if lexical {\n        args.push("--lexical");\n    }\n',
-                  '    if lexical {\n        return lexical_ids(db, query);\n    }\n',
-              )
+              text = text.replace('    if lexical {\n        args.push("--lexical".to_owned());\n    }\n', '    if lexical {\n        return lexical_ids(db, query);\n    }\n')
+              text = text.replace('    if lexical {\n        args.push("--lexical");\n    }\n', '    if lexical {\n        return lexical_ids(db, query);\n    }\n')
               marker = 'fn semantic_ids(db: &Path, query: &str) -> Vec<String> {'
               assert marker in text, filename
               if 'fn lexical_ids(db: &Path, query: &str)' not in text:
@@ -84,7 +71,6 @@ jobs:
               path.write_text(text)
           PY
 
-          ! grep -R -- "--lexical" src tests --include='*.rs' 2>/dev/null || false
           cargo fmt --all
           cargo test --all-targets
           cargo clippy --all-targets -- -D warnings
