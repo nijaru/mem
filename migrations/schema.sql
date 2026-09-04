@@ -8,7 +8,7 @@ CREATE TABLE memories (
     source_type TEXT NOT NULL,
     source_ref TEXT,
     status TEXT NOT NULL CHECK (status IN ('active', 'superseded', 'deleted')),
-    superseded_by TEXT REFERENCES memories(id),
+    superseded_by TEXT,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     deleted_at INTEGER
