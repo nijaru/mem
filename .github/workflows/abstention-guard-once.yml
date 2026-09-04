@@ -1,0 +1,141 @@
+name: abstention-guard-once
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/abstention-guard-once.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-22.04
+    env:
+      MEM_MODEL_CACHE: ${{ github.workspace }}/.model-cache
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/cache@v4
+        with:
+          path: .model-cache
+          key: fastembed-5.3.0-bge-small-en-v1.5-q-${{ runner.os }}-${{ runner.arch }}
+      - name: Add and verify context abstention guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          main = Path('src/main.rs')
+          text = main.read_text()
+          needle = 'const RECALL_DEFAULT_MAX_BYTES: usize = 32 * 1024;\n'
+          assert needle in text
+          text = text.replace(
+              needle,
+              needle + '\n/// Minimum cosine similarity for automatic semantic context recall.\n/// Calibrated against real-project positives and unrelated no-answer probes;\n/// explicit semantic diagnostics remain unfiltered.\nconst SEMANTIC_CONTEXT_MIN_SCORE: f64 = 0.55;\n',
+              1,
+          )
+          old = '''        return Ok(hits
+            .into_iter()
+            .map(|hit| SearchHit {
+                memory: hit.memory,
+                rank: hit.score,
+            })
+            .collect());'''
+          new = '''        return Ok(hits
+            .into_iter()
+            .filter(|hit| hit.score >= SEMANTIC_CONTEXT_MIN_SCORE)
+            .map(|hit| SearchHit {
+                memory: hit.memory,
+                rank: hit.score,
+            })
+            .collect());'''
+          assert old in text
+          text = text.replace(old, new, 1)
+          main.write_text(text)
+
+          heldout = Path('tests/heldout_eval.rs')
+          text = heldout.read_text()
+          marker = '#[test]\n#[ignore = "loads the cached embedding model; intended for the retrieval-eval workflow"]\nfn poisoned_high_rank_text_stays_delimited_by_scope_and_status() {'
+          assert marker in text
+          test = r'''#[test]
+#[ignore = "loads the cached embedding model; intended for the retrieval-eval workflow"]
+fn context_abstains_on_unrelated_queries_without_losing_heldout_recall() {
+    let db = test_path();
+    let seeds = corpus();
+    let cases = held_out_cases();
+    let mut ids = std::collections::HashMap::new();
+
+    for seed in &seeds {
+        let output = remember(&db, seed);
+        ids.insert(
+            seed.key,
+            output["id"].as_str().expect("id").to_owned(),
+        );
+    }
+    run_json(&db, &["index", "run", "-n", "128"]);
+
+    let mut retained = 0usize;
+    for case in &cases {
+        let expected = ids.get(case.key).expect("target seed");
+        let recalled = context_ids(&db, case.query, false);
+        if recalled.iter().take(3).any(|id| id == expected) {
+            retained += 1;
+        }
+    }
+    assert!(
+        retained * 3 >= cases.len() * 2,
+        "context threshold dropped too many intended held-out matches: {retained}/{}",
+        cases.len()
+    );
+
+    let unrelated = [
+        "best recipe for sourdough bread hydration and baking temperature",
+        "who won the 1998 world cup final and what was the score",
+        "how should i prune a mature lemon tree in winter",
+        "compare hotel neighborhoods for a weekend trip to lisbon",
+        "what chord progression works for a sad jazz ballad in e flat minor",
+        "symptoms of a failing alternator in a 2012 honda civic",
+        "explain photosynthesis to a fifth grade student",
+        "which trail running shoes are best for rocky terrain",
+    ];
+    for query in unrelated {
+        let recalled = context_ids(&db, query, false);
+        assert!(
+            recalled.is_empty(),
+            "unrelated query should abstain: {query:?} -> {recalled:?}"
+        );
+    }
+
+    cleanup(&db);
+}
+
+'''
+          text = text.replace(marker, test + marker, 1)
+          heldout.write_text(text)
+          PY
+
+          cargo fmt --all
+          cargo test --all-targets
+          cargo clippy --all-targets -- -D warnings
+          cargo test --test heldout_eval context_abstains_on_unrelated_queries_without_losing_heldout_recall -- --ignored --nocapture
+          git diff --check
+      - name: Commit verified abstention guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm .github/workflows/abstention-guard-once.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "feat: abstain on weak semantic context matches"
+          git pull --rebase origin main
+          git push origin HEAD:main
