@@ -621,6 +621,10 @@ fn parse_cli(argv: &[String]) -> Option<MemCli> {
 /// Default recall byte budget across all returned memory texts.
 const RECALL_DEFAULT_MAX_BYTES: usize = 32 * 1024;
 
+/// Minimum cosine similarity for automatic semantic context recall.
+/// Calibrated against project-realistic positives and unrelated queries.
+const SEMANTIC_CONTEXT_MIN_SCORE: f64 = 0.55;
+
 fn run(cli: MemCli) -> Result<()> {
     let explicit_db = cli.db.is_some()
         || std::env::var_os("MEM_DB")
@@ -1302,6 +1306,7 @@ pub fn recall_hits(
         )?;
         return Ok(hits
             .into_iter()
+            .filter(|hit| hit.score >= SEMANTIC_CONTEXT_MIN_SCORE)
             .map(|hit| SearchHit {
                 memory: hit.memory,
                 rank: hit.score,

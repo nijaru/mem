@@ -150,6 +150,55 @@ fn held_out_queries_retrieve_targets_over_hard_negatives() {
 
 #[test]
 #[ignore = "loads the cached embedding model; intended for the retrieval-eval workflow"]
+fn context_abstains_on_unrelated_queries_without_losing_heldout_recall() {
+    let db = test_path();
+    let seeds = corpus();
+    let cases = held_out_cases();
+    let mut ids = std::collections::HashMap::new();
+
+    for seed in &seeds {
+        let output = remember(&db, seed);
+        ids.insert(seed.key, output["id"].as_str().expect("id").to_owned());
+    }
+    run_json(&db, &["index", "run", "-n", "128"]);
+
+    let mut retained = 0usize;
+    for case in &cases {
+        let expected = ids.get(case.key).expect("target seed");
+        let recalled = context_ids(&db, case.query, false);
+        if recalled.iter().take(3).any(|id| id == expected) {
+            retained += 1;
+        }
+    }
+    assert!(
+        retained * 3 >= cases.len() * 2,
+        "context threshold dropped too many intended held-out matches: {retained}/{}",
+        cases.len()
+    );
+
+    let unrelated = [
+        "best recipe for sourdough bread hydration and baking temperature",
+        "who won the 1998 world cup final and what was the score",
+        "how should i prune a mature lemon tree in winter",
+        "compare hotel neighborhoods for a weekend trip to lisbon",
+        "what chord progression works for a sad jazz ballad in e flat minor",
+        "symptoms of a failing alternator in a 2012 honda civic",
+        "explain photosynthesis to a fifth grade student",
+        "which trail running shoes are best for rocky terrain",
+    ];
+    for query in unrelated {
+        let recalled = context_ids(&db, query, false);
+        assert!(
+            recalled.is_empty(),
+            "unrelated query should abstain: {query:?} -> {recalled:?}"
+        );
+    }
+
+    cleanup(&db);
+}
+
+#[test]
+#[ignore = "loads the cached embedding model; intended for the retrieval-eval workflow"]
 fn poisoned_high_rank_text_stays_delimited_by_scope_and_status() {
     // Poisoning-oriented probes: adversarial keyword-stuffed memories must
     // not displace legitimate targets *for a different intent* in the same
