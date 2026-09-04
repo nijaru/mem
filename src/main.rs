@@ -1,6 +1,5 @@
 mod embedding;
 mod embedding_worker;
-mod episode;
 mod id_resolve;
 mod index_job;
 mod project;
@@ -20,7 +19,6 @@ use usage::{Args, Cli, Subcommands};
 use crate::embedding_worker::{
     EMBEDDING_MODEL_ID, EmbeddingRunOptions, embed_query, embed_query_if_cached, model_cache_dir,
 };
-use crate::episode::{NewEpisode, NewEpisodeEntry};
 use crate::project::ProjectContext;
 use crate::storage::StorageRouter;
 
@@ -60,8 +58,6 @@ enum Command {
     Search(Search),
     Get(Get),
     Forget(Forget),
-    Episode(EpisodeCommand),
-    History(History),
     Index(IndexCommand),
 }
 
@@ -306,122 +302,6 @@ struct Get {
 struct Forget {
     /// Full memory ID or an unambiguous ID prefix.
     id: String,
-}
-
-/// Record and inspect episodic source history.
-#[derive(Args)]
-struct EpisodeCommand {
-    #[usage(subcommand)]
-    command: EpisodeSubcommand,
-}
-
-#[derive(Subcommands)]
-enum EpisodeSubcommand {
-    Create(EpisodeCreate),
-    Record(EpisodeRecordCommand),
-    End(EpisodeEnd),
-    Get(EpisodeGet),
-}
-
-/// Create or resolve an episode for one original source/session.
-#[derive(Args)]
-struct EpisodeCreate {
-    /// Stable source reference for the original session or event stream.
-    source_ref: String,
-
-    /// Source type, such as session, transcript, or event-stream.
-    #[usage(long)]
-    source_type: Option<String>,
-
-    /// Override the current project identifier.
-    #[usage(long)]
-    project: Option<String>,
-
-    /// Override the current workspace identifier.
-    #[usage(long)]
-    workspace: Option<String>,
-
-    /// Store an unscoped/global episode instead of detecting a project.
-    #[usage(long = "global")]
-    global_episode: bool,
-
-    /// Source start timestamp in Unix milliseconds.
-    #[usage(long)]
-    started_at: Option<i64>,
-
-    /// Opaque valid JSON metadata retained with the episode.
-    #[usage(long)]
-    metadata_json: Option<String>,
-}
-
-/// Add or refresh one searchable entry with an exact source backreference.
-#[derive(Args)]
-struct EpisodeRecordCommand {
-    /// Full episode ID or an unambiguous ID prefix.
-    episode: String,
-
-    /// Stable source-local locator for this entry.
-    source_ref: String,
-
-    /// Searchable textual content for this entry.
-    text: String,
-
-    /// Optional explicit source order; otherwise append after the current maximum.
-    #[usage(long)]
-    ordinal: Option<i64>,
-
-    /// Entry kind, such as message, tool, summary, or event.
-    #[usage(long)]
-    kind: Option<String>,
-
-    /// Optional conversational role such as user or assistant.
-    #[usage(long)]
-    role: Option<String>,
-
-    /// Source occurrence timestamp in Unix milliseconds.
-    #[usage(long)]
-    occurred_at: Option<i64>,
-
-    /// Opaque valid JSON metadata retained with the source entry.
-    #[usage(long)]
-    metadata_json: Option<String>,
-}
-
-/// Mark an episode complete.
-#[derive(Args)]
-struct EpisodeEnd {
-    /// Full episode ID or an unambiguous ID prefix.
-    episode: String,
-
-    /// End timestamp in Unix milliseconds; defaults to now.
-    #[usage(long)]
-    ended_at: Option<i64>,
-}
-
-/// Read one episode and its indexed source entries.
-#[derive(Args)]
-struct EpisodeGet {
-    /// Full episode ID or an unambiguous ID prefix.
-    episode: String,
-}
-
-/// Search indexed episodic history while preserving original-source references.
-#[derive(Args)]
-struct History {
-    /// Lexical history query; all terms must match an entry.
-    query: String,
-
-    /// Override the current project identifier.
-    #[usage(long)]
-    project: Option<String>,
-
-    /// Search only unscoped/global episode history.
-    #[usage(long = "global")]
-    global_history: bool,
-
-    /// Maximum number of matching source entries.
-    #[usage(short = 'n', long)]
-    limit: Option<usize>,
 }
 
 /// Operate the durable derived-index work queue.
@@ -979,106 +859,6 @@ fn run(cli: MemCli) -> Result<()> {
                 println!("forgot {id}");
             }
         }
-        Command::Episode(command) => match command.command {
-            EpisodeSubcommand::Create(command) => {
-                let context = episode_context(
-                    command.project.as_deref(),
-                    command.workspace.as_deref(),
-                    command.global_episode,
-                )?;
-                let store =
-                    router.write_store(context.as_ref().map(|value| value.project_id.as_str()))?;
-                let episode = store.ensure_episode(NewEpisode {
-                    project_id: context.as_ref().map(|value| value.project_id.clone()),
-                    workspace_id: context.as_ref().map(|value| value.workspace_id.clone()),
-                    source_type: command.source_type.unwrap_or_else(|| "session".to_owned()),
-                    source_ref: command.source_ref,
-                    started_at: command.started_at,
-                    metadata_json: command.metadata_json,
-                })?;
-                if cli.json {
-                    print_json(&episode)?;
-                } else {
-                    println!(
-                        "{}\t{}\t{}",
-                        episode.id, episode.source_type, episode.source_ref
-                    );
-                }
-            }
-            EpisodeSubcommand::Record(command) => {
-                let (store, episode_id) =
-                    crate::storage::routed_resolve_episode(&router, None, &command.episode)?;
-                let entry = store.record_episode_entry(
-                    &episode_id,
-                    NewEpisodeEntry {
-                        source_ref: command.source_ref,
-                        ordinal: command.ordinal,
-                        kind: command.kind.unwrap_or_else(|| "message".to_owned()),
-                        role: command.role,
-                        text: command.text,
-                        occurred_at: command.occurred_at,
-                        metadata_json: command.metadata_json,
-                    },
-                )?;
-                if cli.json {
-                    print_json(&entry)?;
-                } else {
-                    println!(
-                        "{}\t{}\t{}\t{}",
-                        entry.id, entry.ordinal, entry.source_ref, entry.text
-                    );
-                }
-            }
-            EpisodeSubcommand::End(command) => {
-                let (store, episode_id) =
-                    crate::storage::routed_resolve_episode(&router, None, &command.episode)?;
-                let episode = store.end_episode(&episode_id, command.ended_at)?;
-                if cli.json {
-                    print_json(&episode)?;
-                } else {
-                    println!(
-                        "ended {} at {}",
-                        episode.id,
-                        episode.ended_at.unwrap_or_default()
-                    );
-                }
-            }
-            EpisodeSubcommand::Get(command) => {
-                let (store, episode_id) =
-                    crate::storage::routed_resolve_episode(&router, None, &command.episode)?;
-                let record = store.get_episode(&episode_id)?;
-                if cli.json {
-                    print_json(&record)?;
-                } else {
-                    print_episode(&record);
-                }
-            }
-        },
-        Command::History(command) => {
-            let project_id = memory_project(command.project.as_deref(), command.global_history)?;
-            let hits = crate::storage::routed_history_search(
-                &router,
-                project_id.as_deref(),
-                &command.query,
-                command.limit.unwrap_or(10).clamp(1, 100),
-            )?;
-            if cli.json {
-                print_json(&hits)?;
-            } else {
-                for hit in hits {
-                    let scope = hit.project_id.as_deref().unwrap_or("global");
-                    println!(
-                        "{}\t{}\t{}\t{}\t{}\t{}",
-                        hit.episode_id,
-                        hit.ordinal,
-                        scope,
-                        hit.episode_source_ref,
-                        hit.entry_source_ref,
-                        hit.text
-                    );
-                }
-            }
-        }
         Command::Index(command) => match command.command {
             IndexSubcommand::Status(_) => {
                 let context = optional_project_context(None, None)?;
@@ -1249,20 +1029,6 @@ fn project_context(project: Option<&str>, workspace: Option<&str>) -> Result<Pro
         .context("no project detected; run inside a Git repository or pass --project")
 }
 
-fn episode_context(
-    project: Option<&str>,
-    workspace: Option<&str>,
-    global: bool,
-) -> Result<Option<ProjectContext>> {
-    if global && (project.is_some() || workspace.is_some()) {
-        bail!("--global conflicts with --project and --workspace");
-    }
-    if global {
-        return Ok(None);
-    }
-    optional_project_context(project, workspace)
-}
-
 fn memory_project(explicit: Option<&str>, global: bool) -> Result<Option<String>> {
     if global && explicit.is_some() {
         bail!("--global conflicts with --project");
@@ -1366,31 +1132,6 @@ fn print_context(output: &ContextOutput) {
     }
 }
 
-fn print_episode(record: &crate::episode::EpisodeRecord) {
-    let episode = &record.episode;
-    println!("id: {}", episode.id);
-    if let Some(project) = &episode.project_id {
-        println!("project: {project}");
-    }
-    if let Some(workspace) = &episode.workspace_id {
-        println!("workspace: {workspace}");
-    }
-    println!("source: {} {}", episode.source_type, episode.source_ref);
-    if let Some(started_at) = episode.started_at {
-        println!("started_at: {started_at}");
-    }
-    if let Some(ended_at) = episode.ended_at {
-        println!("ended_at: {ended_at}");
-    }
-    for entry in &record.entries {
-        let role = entry.role.as_deref().unwrap_or("-");
-        println!(
-            "entry: {}\t{}\t{}\t{}\t{}",
-            entry.ordinal, entry.kind, role, entry.source_ref, entry.text
-        );
-    }
-}
-
 fn print_workspace_state(state: &WorkspaceState) {
     println!("project: {}", state.project_id);
     println!("workspace: {}", state.workspace_id);
@@ -1448,7 +1189,6 @@ fn command_writes(command: &Command) -> bool {
     match command {
         Command::Init(_) | Command::Remember(_) | Command::Correct(_) | Command::Forget(_) => true,
         Command::State(state) => !matches!(&state.command, StateCommand::Show(_)),
-        Command::Episode(episode) => !matches!(&episode.command, EpisodeSubcommand::Get(_)),
         Command::Index(index) => !matches!(&index.command, IndexSubcommand::Status(_)),
         _ => false,
     }
@@ -1547,17 +1287,6 @@ mod cli_parse_tests {
     }
 
     #[test]
-    fn history_scope_flags() {
-        let cli = parse("history q --global -n 5");
-        let Command::History(command) = &cli.command else {
-            panic!("expected history");
-        };
-        assert!(command.global_history);
-        assert_eq!(command.limit, Some(5));
-        assert!(command.project.is_none());
-    }
-
-    #[test]
     fn id_commands_take_no_scope_flags() {
         // ID-directed operations resolve inside the current project store.
         let get = parse("get 01abc");
@@ -1566,20 +1295,6 @@ mod cli_parse_tests {
         assert!(matches!(forget.command, super::Command::Forget(_)));
         let correct = parse("correct 01abc new-text");
         assert!(matches!(correct.command, super::Command::Correct(_)));
-    }
-
-    #[test]
-    fn episode_subcommands_parse() {
-        let cli = parse("episode create s1 --source-type session --project p");
-        let Command::Episode(command) = &cli.command else {
-            panic!("expected episode");
-        };
-        let super::EpisodeSubcommand::Create(create) = &command.command else {
-            panic!("expected create");
-        };
-        assert_eq!(create.source_type.as_deref(), Some("session"));
-        assert_eq!(create.source_ref, "s1");
-        assert_eq!(create.project.as_deref(), Some("p"));
     }
 
     #[test]
@@ -1598,28 +1313,5 @@ mod cli_parse_tests {
         assert_eq!(patch.task.as_deref(), Some("t1"));
         assert_eq!(patch.checkpoint.as_deref(), Some("c"));
         assert_eq!(patch.clear, vec!["session".to_owned(), "goal".to_owned()]);
-    }
-
-    #[test]
-    fn dispatcher_knows_every_command_name() {
-        // Probing each top-level command name through parse_cli checks the
-        // dispatcher knows it; parse_cli exits on hard failures, so only run
-        // well-formed invocations here.
-        let probes = [
-            ("remember x", "remember"),
-            ("search x", "search"),
-            ("context x", "context"),
-            ("history x", "history"),
-            ("get x", "get"),
-            ("forget x", "forget"),
-            ("status", "status"),
-            ("project", "project"),
-        ];
-        for (probe, _name) in probes {
-            let argv = std::iter::once("mem".to_owned())
-                .chain(probe.split_whitespace().map(str::to_owned))
-                .collect::<Vec<_>>();
-            let _ = parse_cli(&argv);
-        }
     }
 }

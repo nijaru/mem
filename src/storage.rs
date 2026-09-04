@@ -6,7 +6,6 @@ use anyhow::{Result, bail};
 use serde::Serialize;
 
 use crate::embedding_worker::{EMBEDDING_MODEL_ID, EmbeddingRunOptions};
-use crate::episode::HistoryHit;
 use crate::index_job::IndexJobStats;
 use crate::store::{SearchHit, Store, WorkspaceState};
 use crate::vector_search::SemanticSearchHit;
@@ -41,16 +40,6 @@ pub fn routed_resolve_memory(
 ) -> Result<(Store, String)> {
     resolve_id(router, id_or_prefix, "memory", |store, candidate| {
         store.memory_id_candidates(candidate)
-    })
-}
-
-pub fn routed_resolve_episode(
-    router: &StorageRouter,
-    _project_hint: Option<&str>,
-    id_or_prefix: &str,
-) -> Result<(Store, String)> {
-    resolve_id(router, id_or_prefix, "episode", |store, candidate| {
-        store.episode_id_candidates(candidate)
     })
 }
 
@@ -116,18 +105,6 @@ pub fn routed_semantic_search(
         return Ok(Vec::new());
     };
     store.semantic_search_by_vector(query_vector, EMBEDDING_MODEL_ID, project_id, limit)
-}
-
-pub fn routed_history_search(
-    router: &StorageRouter,
-    project_id: Option<&str>,
-    query: &str,
-    limit: usize,
-) -> Result<Vec<HistoryHit>> {
-    let Some(store) = router.read_store()? else {
-        return Ok(Vec::new());
-    };
-    store.history_search(query, project_id, limit)
 }
 
 pub fn routed_workspace_state(

@@ -1,8 +1,7 @@
 //! Shared exact-ID-or-prefix resolution and FTS query construction.
 //!
-//! One implementation so memories and episodes cannot drift apart on the
-//! same rules — the duplicated builders previously produced paired defects
-//! (unescaped LIKE prefixes, divergent AND/OR joining).
+//! Memory ID prefix resolution and FTS query construction share the same
+//! literal-prefix escaping rules.
 
 use anyhow::{Result, bail};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -96,15 +95,6 @@ impl super::store::Store {
     pub(crate) fn resolve_memory_id(&self, id_or_prefix: &str) -> Result<String> {
         resolve_id(&self.connection, "memories", "memory", id_or_prefix)
     }
-
-    /// Episode IDs matching an exact ID or prefix, for routed resolution.
-    pub fn episode_id_candidates(&self, id_or_prefix: &str) -> Result<Vec<String>> {
-        id_candidates(&self.connection, "episodes", id_or_prefix, 3)
-    }
-
-    pub(crate) fn resolve_episode_id(&self, id_or_prefix: &str) -> Result<String> {
-        resolve_id(&self.connection, "episodes", "episode", id_or_prefix)
-    }
 }
 #[cfg(test)]
 mod tests {
@@ -119,10 +109,8 @@ mod tests {
     }
 
     #[test]
-    fn wildcards_in_prefixes_match_literally_for_both_entities() {
-        // A `_` or `%` in a candidate must not act as a SQL LIKE wildcard —
-        // the defect class where episode resolution drifted from memory
-        // resolution before this module unified them.
+    fn wildcards_in_memory_prefixes_match_literally() {
+        // SQL LIKE wildcard characters in an ID candidate must match literally.
         let path = test_path();
         let mut store = Store::open(&path).expect("open store");
         store
@@ -135,35 +123,16 @@ mod tests {
                 source_ref: None,
             })
             .expect("seed memory");
-        store
-            .ensure_episode(super::super::episode::NewEpisode {
-                project_id: None,
-                workspace_id: None,
-                source_type: "test".to_owned(),
-                source_ref: "wildcard-episode".to_owned(),
-                started_at: None,
-                metadata_json: None,
-            })
-            .expect("seed episode");
 
         for wildcard in ["_", "%", "\\".to_string().as_str()] {
             assert!(
                 store.get(wildcard).is_err(),
                 "memory wildcard {wildcard:?} must not resolve"
             );
-            assert!(
-                store.resolve_episode_id(wildcard).is_err(),
-                "episode wildcard {wildcard:?} must not resolve"
-            );
         }
-        // Sanity: an empty prefix is a prefix of every ID, so candidates
-        // return all rows; instead assert a real full-ID prefix resolves.
+        // Sanity: a real full-ID prefix still resolves.
         let memory_id = store.memory_id_candidates("01").expect("memory candidates");
         assert!(!memory_id.is_empty(), "real prefix must match");
-        let episode_id = store
-            .episode_id_candidates("01")
-            .expect("episode candidates");
-        assert!(!episode_id.is_empty(), "real episode prefix must match");
 
         let _ = std::fs::remove_file(&path);
     }
