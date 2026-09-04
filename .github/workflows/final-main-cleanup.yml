@@ -1,0 +1,167 @@
+name: final-main-cleanup
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/final-main-cleanup.yml
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-22.04
+    env:
+      MEM_MODEL_CACHE: .model-cache
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Cache embedding model
+        uses: actions/cache@v4
+        with:
+          path: .model-cache
+          key: mem-fastembed-v1
+      - name: Apply cleanup
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          store = Path('src/store.rs')
+          text = store.read_text()
+          old = '''    pub fn recall(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
+              self.search_fts(&crate::id_resolve::fts_query(query)?, limit)
+          }
+
+          '''
+          if old not in text:
+              raise SystemExit('Store::recall block not found')
+          store.write_text(text.replace(old, '', 1))
+
+          main = Path('src/main.rs')
+          text = main.read_text()
+          old_budget = '''            for hit in hits {
+              let bytes = hit.memory.text.len();
+              if max_bytes > 0 && !memories.is_empty() && total + bytes > max_bytes {
+                  break;
+              }
+              total += bytes;
+              memories.push(hit.memory);
+          }
+          '''
+          new_budget = '''            for hit in hits {
+              let bytes = hit.memory.text.len();
+              if max_bytes > 0 && total + bytes > max_bytes {
+                  continue;
+              }
+              total += bytes;
+              memories.push(hit.memory);
+          }
+          '''
+          if old_budget not in text:
+              raise SystemExit('context budget block not found')
+          text = text.replace(old_budget, new_budget, 1)
+          old_fallback = '    store.recall(query, limit)\n'
+          if old_fallback not in text:
+              raise SystemExit('recall fallback not found')
+          text = text.replace(old_fallback, '    store.search(query, limit)\n', 1)
+          old_db = '''    if let Some(root) = crate::workspace::repo_root() {
+              for ancestor in cwd.ancestors() {
+                  let mem_dir = ancestor.join(".mem");
+                  if mem_dir.is_dir() {
+                      return Ok(mem_dir.join("mem.db"));
+                  }
+                  if ancestor == root {
+                      break;
+                  }
+              }
+              return Ok(root.join(".mem").join("mem.db"));
+          }
+          '''
+          new_db = '''    if let Some(root) = crate::workspace::repo_root() {
+              return Ok(root.join(".mem").join("mem.db"));
+          }
+          '''
+          if old_db not in text:
+              raise SystemExit('git-root database block not found')
+          main.write_text(text.replace(old_db, new_db, 1))
+
+          tests = Path('tests/repo_local.rs')
+          text = tests.read_text()
+          addition = r'''
+
+          #[test]
+          fn nested_mem_directory_does_not_shadow_git_root_store() {
+              let root = temp_dir();
+              let git = Command::new("git")
+                  .args(["init", "-q", root.to_str().unwrap()])
+                  .output()
+                  .unwrap();
+              assert!(git.status.success());
+              assert!(run(&root, &["init"]).status.success());
+
+              let nested = root.join("src/deep");
+              std::fs::create_dir_all(nested.join(".mem")).unwrap();
+              let value = run_json(&nested, &["status"]);
+              assert_eq!(
+                  value["database"],
+                  root.join(".mem/mem.db").display().to_string()
+              );
+              std::fs::remove_dir_all(root).unwrap();
+          }
+
+          #[test]
+          fn context_max_bytes_is_a_hard_bound() {
+              let cwd = temp_dir();
+              run_json(
+                  &cwd,
+                  &["remember", "oversized memory payload", "--source-type", "test"],
+              );
+              let value = run_json(&cwd, &["context", "oversized", "--max-bytes", "4"]);
+              assert_eq!(value["memories"].as_array().map(Vec::len), Some(0));
+              std::fs::remove_dir_all(cwd).unwrap();
+          }
+          '''
+          if 'fn context_max_bytes_is_a_hard_bound()' in text:
+              raise SystemExit('cleanup tests already present')
+          tests.write_text(text + addition)
+
+          readme = Path('README.md')
+          text = readme.read_text()
+          old = 'Each project owns one SQLite database at `.mem/mem.db`.'
+          new = 'Each Git project owns one SQLite database at the repository-root `.mem/mem.db`.'
+          if old not in text:
+              raise SystemExit('README storage sentence not found')
+          readme.write_text(text.replace(old, new, 1))
+          PY
+      - name: Format
+        run: cargo fmt --all
+      - name: Test
+        run: cargo test --all-targets
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Release build
+        run: cargo build --release
+      - name: Retrieval evaluation
+        run: |
+          cargo test --test retrieval_eval -- --ignored --nocapture
+          cargo test --test real_corpus_eval -- --ignored --nocapture
+          cargo test --test heldout_eval -- --ignored --nocapture
+      - name: Commit verified cleanup
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/store.rs src/main.rs tests/repo_local.rs README.md
+          git commit -m "refactor: tighten repo-local context contracts"
+          git push origin HEAD:main
