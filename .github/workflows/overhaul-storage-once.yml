@@ -1,0 +1,314 @@
+name: overhaul-storage-once
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/overhaul-storage-once.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Prune managed storage implementation
+        shell: bash
+        run: |
+          cat > src/storage.rs <<'RS'
+          //! Single-store routing for the project-local SQLite database.
+
+          use std::path::{Path, PathBuf};
+
+          use anyhow::{Result, bail};
+          use serde::Serialize;
+
+          use crate::embedding_worker::{EMBEDDING_MODEL_ID, EmbeddingRunOptions};
+          use crate::episode::HistoryHit;
+          use crate::index_job::IndexJobStats;
+          use crate::store::{SearchHit, Store, WorkspaceState};
+          use crate::vector_search::SemanticSearchHit;
+
+          #[derive(Debug, Clone)]
+          pub struct StorageRouter {
+              path: PathBuf,
+          }
+
+          impl StorageRouter {
+              pub fn exact(path: PathBuf) -> Self {
+                  Self { path }
+              }
+
+              pub fn path(&self) -> &Path {
+                  &self.path
+              }
+
+              pub fn write_store(&self, _project_id: Option<&str>) -> Result<Store> {
+                  Store::open(&self.path)
+              }
+
+              fn read_store(&self) -> Result<Option<Store>> {
+                  Store::open_existing(&self.path)
+              }
+          }
+
+          pub fn routed_resolve_memory(
+              router: &StorageRouter,
+              _project_hint: Option<&str>,
+              id_or_prefix: &str,
+          ) -> Result<(Store, String)> {
+              resolve_id(
+                  router,
+                  id_or_prefix,
+                  "memory",
+                  |store, candidate| store.memory_id_candidates(candidate),
+              )
+          }
+
+          pub fn routed_resolve_episode(
+              router: &StorageRouter,
+              _project_hint: Option<&str>,
+              id_or_prefix: &str,
+          ) -> Result<(Store, String)> {
+              resolve_id(
+                  router,
+                  id_or_prefix,
+                  "episode",
+                  |store, candidate| store.episode_id_candidates(candidate),
+              )
+          }
+
+          fn resolve_id<F>(
+              router: &StorageRouter,
+              id_or_prefix: &str,
+              kind: &str,
+              candidates: F,
+          ) -> Result<(Store, String)>
+          where
+              F: FnOnce(&Store, &str) -> Result<Vec<String>>,
+          {
+              let candidate = id_or_prefix.trim();
+              if candidate.is_empty() {
+                  bail!("{kind} ID cannot be empty");
+              }
+              let Some(store) = router.read_store()? else {
+                  bail!("{kind} not found: {candidate}");
+              };
+              let matches = candidates(&store, candidate)?;
+              if let Some(exact) = matches.iter().find(|id| id.as_str() == candidate) {
+                  return Ok((store, exact.clone()));
+              }
+              match matches.as_slice() {
+                  [] => bail!("{kind} not found: {candidate}"),
+                  [id] => Ok((store, id.clone())),
+                  _ => bail!("ambiguous {kind} ID prefix: {candidate}"),
+              }
+          }
+
+          pub fn routed_recall_hits(
+              router: &StorageRouter,
+              project_id: Option<&str>,
+              query: &str,
+              limit: usize,
+              force_lexical: bool,
+          ) -> Result<Vec<SearchHit>> {
+              let Some(store) = router.read_store()? else {
+                  return Ok(Vec::new());
+              };
+              crate::recall_hits(&store, query, project_id, limit, force_lexical)
+          }
+
+          pub fn routed_lexical_search(
+              router: &StorageRouter,
+              project_id: Option<&str>,
+              query: &str,
+              limit: usize,
+          ) -> Result<Vec<SearchHit>> {
+              let Some(store) = router.read_store()? else {
+                  return Ok(Vec::new());
+              };
+              store.search(query, project_id, limit)
+          }
+
+          pub fn routed_semantic_search(
+              router: &StorageRouter,
+              project_id: Option<&str>,
+              query_vector: &[f32],
+              limit: usize,
+          ) -> Result<Vec<SemanticSearchHit>> {
+              let Some(store) = router.read_store()? else {
+                  return Ok(Vec::new());
+              };
+              store.semantic_search_by_vector(
+                  query_vector,
+                  EMBEDDING_MODEL_ID,
+                  project_id,
+                  limit,
+              )
+          }
+
+          pub fn routed_history_search(
+              router: &StorageRouter,
+              project_id: Option<&str>,
+              query: &str,
+              limit: usize,
+          ) -> Result<Vec<HistoryHit>> {
+              let Some(store) = router.read_store()? else {
+                  return Ok(Vec::new());
+              };
+              store.history_search(query, project_id, limit)
+          }
+
+          pub fn routed_workspace_state(
+              router: &StorageRouter,
+              project_id: &str,
+              workspace_id: &str,
+          ) -> Result<Option<WorkspaceState>> {
+              let Some(store) = router.read_store()? else {
+                  return Ok(None);
+              };
+              store.workspace_state(project_id, workspace_id)
+          }
+
+          #[derive(Debug, Serialize)]
+          pub struct RoutedRunStats {
+              pub model: &'static str,
+              pub cache_dir: String,
+              pub stores: usize,
+              pub claimed: usize,
+              pub eligible: usize,
+              pub committed: usize,
+              pub stale: usize,
+              pub retried: usize,
+          }
+
+          pub fn routed_run_index(
+              router: &StorageRouter,
+              _project_id: Option<&str>,
+              _all: bool,
+              options: EmbeddingRunOptions,
+          ) -> Result<RoutedRunStats> {
+              let mut stats = RoutedRunStats {
+                  model: EMBEDDING_MODEL_ID,
+                  cache_dir: options.cache_dir.display().to_string(),
+                  stores: 1,
+                  claimed: 0,
+                  eligible: 0,
+                  committed: 0,
+                  stale: 0,
+                  retried: 0,
+              };
+              let Some(mut store) = router.read_store()? else {
+                  return Ok(stats);
+              };
+              let run = store.run_embedding_jobs(options)?;
+              stats.claimed = run.claimed;
+              stats.eligible = run.eligible;
+              stats.committed = run.committed;
+              stats.stale = run.stale;
+              stats.retried = run.retried;
+              Ok(stats)
+          }
+
+          pub fn routed_index_stats(
+              router: &StorageRouter,
+              _project_id: Option<&str>,
+          ) -> Result<IndexJobStats> {
+              let Some(store) = router.read_store()? else {
+                  return Ok(IndexJobStats {
+                      pending: 0,
+                      running: 0,
+                  });
+              };
+              store.index_job_stats()
+          }
+          RS
+
+          rm src/storage_migration.rs
+          mv tests/managed_default.rs tests/repo_local.rs
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path('src/main.rs')
+          text = path.read_text()
+          text = text.replace('mod storage_migration;\n', '')
+          text = text.replace(
+              'use crate::storage::{ManagedLayout, ProjectDb, StorageRouter};',
+              'use crate::storage::StorageRouter;',
+          )
+          text = re.sub(
+              r'/// The low-level worker protocol operates on one exact database\..*?\n\}\nuse crate::store::',
+              '''/// Open the current database for a low-level index mutation.\nfn require_exact_store(router: &StorageRouter) -> Result<Store> {\n    Store::open(router.path())\n}\nuse crate::store::''',
+              text,
+              count=1,
+              flags=re.S,
+          )
+          text = text.replace('    Storage(StorageCommand),\n', '')
+          text, count = re.subn(
+              r'\n/// Manage the managed storage layout\.\n#\[derive\(Args\)\]\nstruct StorageCommand \{.*?\n#\[derive\(Subcommands\)\]\nenum IndexSubcommand',
+              '\n#[derive(Subcommands)]\nenum IndexSubcommand',
+              text,
+              count=1,
+              flags=re.S,
+          )
+          assert count == 1, f'storage command definition removal: {count}'
+          text, count = re.subn(
+              r'\n    /// Maintenance mode: process every existing managed project database,\n    /// not just the current scope\. Managed layout only\.\n    #\[usage\(long\)\]\n    all: bool,',
+              '',
+              text,
+              count=1,
+          )
+          assert count == 1, f'index --all removal: {count}'
+          text = text.replace('                    command.all,\n', '                    false,\n')
+          text, count = re.subn(
+              r'\n        Command::Storage\(command\) => match command\.command \{.*?\n        \},\n    \}\n\n    Ok\(\(\)\)',
+              '\n    }\n\n    Ok(())',
+              text,
+              count=1,
+              flags=re.S,
+          )
+          assert count == 1, f'storage dispatch removal: {count}'
+          text, count = re.subn(
+              r'\n/// Interpret a `storage migrate --from` value as the legacy root:.*?\nfn legacy_root_from\(from: PathBuf\) -> PathBuf \{.*?\n\}\n',
+              '\n',
+              text,
+              count=1,
+              flags=re.S,
+          )
+          assert count == 1, f'legacy root helper removal: {count}'
+          text = text.replace(
+              '                // Low-level worker protocol operations must be pinned to one\n                // exact database: a worker holds a lease in one file, and\n                // managed operation must not guess which store owns a job.\n',
+              '',
+          )
+          text = text.replace(
+              '        // get/forget/correct resolve across managed stores by design, so\n        // they must not grow --project/--global until routing changes.\n',
+              '        // ID-directed operations resolve inside the current project store.\n',
+          )
+          path.write_text(text)
+          PY
+
+          cargo fmt --all
+          cargo test --all-targets
+          cargo clippy --all-targets -- -D warnings
+          cargo build --release
+          git diff --check
+      - name: Commit verified managed-storage prune
+        shell: bash
+        run: |
+          rm .github/workflows/overhaul-storage-once.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "refactor: prune managed storage architecture"
+          git push origin HEAD:main
