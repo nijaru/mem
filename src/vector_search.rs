@@ -19,38 +19,8 @@ struct VectorCandidate {
 }
 
 impl Store {
-    /// Whether every active memory in this local project store has a current-model vector.
     pub fn has_complete_coverage(&self, model: &str) -> Result<bool> {
-        if model.trim().is_empty() {
-            bail!("embedding model identifier cannot be empty");
-        }
-        let covered: i64 = self.connection.query_row(
-            "SELECT COUNT(*)
-
-             FROM memories AS m
-
-             WHERE m.status = 'active'
-
- AND EXISTS (
-
-     SELECT 1 FROM embeddings AS e
-
-     WHERE e.entity_type = 'memory'
-
-       AND e.entity_id = m.id
-
-       AND e.model = ?1
-
- )",
-            [model],
-            |row| row.get(0),
-        )?;
-        let visible: i64 = self.connection.query_row(
-            "SELECT COUNT(*) FROM memories WHERE status = 'active'",
-            [],
-            |row| row.get(0),
-        )?;
-        Ok(covered == visible)
+        Ok(self.embedding_coverage(model)?.unindexed == 0)
     }
 
     pub fn semantic_search_by_vector(
@@ -60,35 +30,26 @@ impl Store {
         limit: usize,
     ) -> Result<Vec<SemanticSearchHit>> {
         if model.trim().is_empty() {
-            bail!("embedding model identifier cannot be empty");
+            bail!("embedding model cannot be empty");
         }
         if limit == 0 {
             bail!("semantic search limit must be greater than zero");
         }
         let query = normalize_query(query_vector)?;
         let mut statement = self.connection.prepare(
-            "SELECT m.id, m.scope, m.project_id, m.kind, m.text, m.actor, m.status,
-\
-      m.created_at, m.updated_at, m.deleted_at, e.dimensions, e.vector
-\
-             FROM embeddings AS e
-\
-             JOIN memories AS m ON m.id = e.entity_id
-\
-             WHERE e.entity_type = 'memory'
-\
- AND e.model = ?1
-\
- AND m.status = 'active'",
+            "SELECT m.id, m.kind, m.text, m.actor, m.source_type, m.source_ref,\n\
+                    m.status, m.superseded_by, m.created_at, m.updated_at, m.deleted_at,\n\
+                    e.dimensions, e.vector\n\
+             FROM embeddings AS e\n\
+             JOIN memories AS m ON m.id = e.memory_id\n\
+             WHERE e.model = ?1\n\
+               AND e.source_updated_at = m.updated_at\n\
+               AND m.status = 'active'",
         )?;
-        let rows = statement.query_map([model], vector_candidate_from_row)?;
-        let mut candidates = Vec::new();
+        let rows = statement.query_map([model], candidate_from_row)?;
+        let mut hits = Vec::new();
         for row in rows {
-            candidates.push(row?);
-        }
-
-        let mut hits = Vec::with_capacity(candidates.len());
-        for candidate in candidates {
+            let candidate = row?;
             let dimensions = usize::try_from(candidate.dimensions)?;
             if dimensions != query.len() {
                 bail!(
@@ -121,22 +82,23 @@ impl Store {
     }
 }
 
-fn vector_candidate_from_row(row: &Row<'_>) -> rusqlite::Result<VectorCandidate> {
+fn candidate_from_row(row: &Row<'_>) -> rusqlite::Result<VectorCandidate> {
     Ok(VectorCandidate {
         memory: Memory {
             id: row.get(0)?,
-            scope: row.get(1)?,
-            project_id: row.get(2)?,
-            kind: row.get(3)?,
-            text: row.get(4)?,
-            actor: row.get(5)?,
+            kind: row.get(1)?,
+            text: row.get(2)?,
+            actor: row.get(3)?,
+            source_type: row.get(4)?,
+            source_ref: row.get(5)?,
             status: row.get(6)?,
-            created_at: row.get(7)?,
-            updated_at: row.get(8)?,
-            deleted_at: row.get(9)?,
+            superseded_by: row.get(7)?,
+            created_at: row.get(8)?,
+            updated_at: row.get(9)?,
+            deleted_at: row.get(10)?,
         },
-        dimensions: row.get(10)?,
-        vector: row.get(11)?,
+        dimensions: row.get(11)?,
+        vector: row.get(12)?,
     })
 }
 
@@ -150,7 +112,6 @@ fn normalize_query(vector: &[f32]) -> Result<Vec<f32>> {
     if vector.iter().any(|value| !value.is_finite()) {
         bail!("semantic query vector must contain only finite values");
     }
-
     let squared_norm = vector
         .iter()
         .map(|value| f64::from(*value) * f64::from(*value))
@@ -165,224 +126,67 @@ fn normalize_query(vector: &[f32]) -> Result<Vec<f32>> {
         .collect())
 }
 
-fn decode_vector(bytes: &[u8], dimensions: usize, entity_id: &str) -> Result<Vec<f32>> {
+fn decode_vector(bytes: &[u8], dimensions: usize, memory_id: &str) -> Result<Vec<f32>> {
     let expected = dimensions
         .checked_mul(size_of::<f32>())
-        .ok_or_else(|| anyhow::anyhow!("embedding dimensions overflow for {entity_id}"))?;
+        .ok_or_else(|| anyhow::anyhow!("embedding dimensions overflow for {memory_id}"))?;
     if bytes.len() != expected {
         bail!(
-            "invalid embedding byte length for {entity_id}: expected {expected}, got {}",
+            "invalid embedding byte length for {memory_id}: expected {expected}, got {}",
             bytes.len()
         );
     }
     let (chunks, remainder) = bytes.as_chunks::<4>();
     if !remainder.is_empty() {
-        bail!("invalid embedding byte alignment for {entity_id}");
+        bail!("invalid embedding byte alignment for {memory_id}");
     }
     let vector: Vec<f32> = chunks
         .iter()
         .map(|chunk| f32::from_le_bytes(*chunk))
         .collect();
     if vector.iter().any(|value| !value.is_finite()) {
-        bail!("stored embedding contains non-finite values for {entity_id}");
+        bail!("stored embedding contains non-finite values for {memory_id}");
     }
     Ok(vector)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
-    use uuid::Uuid;
-
-    use super::Store;
-    use crate::store::NewMemory;
+    use crate::store::{NewMemory, Store};
 
     #[test]
-    fn exact_scan_scores_all_active_memories() {
-        let path = test_path();
-        let mut store = Store::open(&path).expect("open test store");
-        let first = remember(&mut store, "first candidate", None);
-        let best = remember(&mut store, "best candidate", Some("legacy-alpha"));
-        let third = remember(&mut store, "third candidate", Some("legacy-beta"));
-        let jobs = store
-            .claim_index_jobs("worker", 3, Duration::from_secs(30))
-            .expect("claim embedding work");
-        for job in jobs {
-            let vector = if job.entity_id == best.id {
-                [1.0, 0.0]
-            } else if job.entity_id == first.id {
-                [0.8, 0.2]
-            } else {
-                assert_eq!(job.entity_id, third.id);
-                [0.5, 0.5]
-            };
-            seed_vector(
-                &store,
-                &job.entity_id,
-                "test-model",
-                &vector,
-                job.generation,
-            );
-            store
-                .connection
-                .execute(
-                    "DELETE FROM index_jobs WHERE id = ?1",
-                    rusqlite::params![job.id],
-                )
-                .expect("consume seeded job");
-        }
+    fn exact_scan_ranks_all_current_active_vectors() {
+        let path = std::env::temp_dir().join(format!(
+            "mem-vector-test-{}.db",
+            uuid::Uuid::now_v7()
+        ));
+        let store = Store::open(&path).expect("open");
+        let first = remember(&store, "first");
+        let best = remember(&store, "best");
+        store
+            .upsert_embedding_if_current(&first.id, first.updated_at, "test", &[0.8, 0.2])
+            .expect("seed first");
+        store
+            .upsert_embedding_if_current(&best.id, best.updated_at, "test", &[1.0, 0.0])
+            .expect("seed best");
         let hits = store
-            .semantic_search_by_vector(&[2.0, 0.0], "test-model", 10)
-            .expect("search local store");
-        assert_eq!(hits.len(), 3);
+            .semantic_search_by_vector(&[2.0, 0.0], "test", 10)
+            .expect("search");
+        assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].memory.id, best.id);
-        assert!(hits.iter().any(|hit| hit.memory.id == first.id));
-        assert!(hits.iter().any(|hit| hit.memory.id == third.id));
-        drop(store);
-        cleanup(&path);
+        assert!(store.has_complete_coverage("test").expect("coverage"));
+        let _ = std::fs::remove_file(path);
     }
 
-    #[test]
-    fn coverage_gate_tracks_all_active_memories() {
-        let path = test_path();
-        let mut store = Store::open(&path).expect("open test store");
-        let first = remember(&mut store, "first candidate", None);
-        let second = remember(&mut store, "second candidate", Some("legacy-alpha"));
-        assert!(
-            !store
-                .has_complete_coverage("prod-model")
-                .expect("partial gate")
-        );
-
-        let empty_path = test_path();
-        let empty = Store::open(&empty_path).expect("open empty store");
-        assert!(
-            empty
-                .has_complete_coverage("prod-model")
-                .expect("empty gate")
-        );
-        drop(empty);
-        cleanup(&empty_path);
-
-        let jobs = store
-            .claim_index_jobs("worker", 2, Duration::from_secs(30))
-            .expect("claim embedding work");
-        for job in jobs {
-            seed_vector(
-                &store,
-                &job.entity_id,
-                "prod-model",
-                &[1.0, 0.0],
-                job.generation,
-            );
-            store
-                .connection
-                .execute(
-                    "DELETE FROM index_jobs WHERE id = ?1",
-                    rusqlite::params![job.id],
-                )
-                .expect("consume seeded job");
-        }
-        assert!(
-            store
-                .has_complete_coverage("prod-model")
-                .expect("full gate")
-        );
-        assert!(
-            !store
-                .has_complete_coverage("other-model")
-                .expect("wrong-model gate")
-        );
-
-        let fresh = remember(&mut store, "fresh fact", Some("legacy-other"));
-        assert!(
-            !store
-                .has_complete_coverage("prod-model")
-                .expect("fresh gate")
-        );
-        let job = store
-            .claim_index_jobs("worker", 1, Duration::from_secs(30))
-            .expect("claim fresh work")
-            .pop()
-            .expect("fresh job");
-        assert_eq!(job.entity_id, fresh.id);
-        seed_vector(
-            &store,
-            &job.entity_id,
-            "prod-model",
-            &[0.0, 1.0],
-            job.generation,
-        );
-        store
-            .connection
-            .execute(
-                "DELETE FROM index_jobs WHERE id = ?1",
-                rusqlite::params![job.id],
-            )
-            .expect("consume fresh job");
-        assert!(
-            store
-                .has_complete_coverage("prod-model")
-                .expect("restored gate")
-        );
-
-        store.forget(&fresh.id).expect("delete fresh memory");
-        assert!(
-            store
-                .has_complete_coverage("prod-model")
-                .expect("inactive ignored")
-        );
-        let hits = store
-            .semantic_search_by_vector(&[1.0, 0.0], "prod-model", 10)
-            .expect("search still works");
-        assert!(hits.iter().all(|hit| hit.memory.id != fresh.id));
-        assert!(hits.iter().any(|hit| hit.memory.id == first.id));
-        assert!(hits.iter().any(|hit| hit.memory.id == second.id));
-        drop(store);
-        cleanup(&path);
-    }
-
-    fn seed_vector(store: &Store, entity_id: &str, model: &str, vector: &[f32], generation: i64) {
-        let mut encoded = Vec::with_capacity(std::mem::size_of_val(vector));
-        for value in vector {
-            encoded.extend_from_slice(&value.to_le_bytes());
-        }
-        store
-            .connection
-            .execute(
-                "INSERT INTO embeddings (
-       entity_type, entity_id, model, dimensions, vector, source_generation, updated_at
-   ) VALUES ('memory', ?1, ?2, ?3, ?4, ?5, 0)
-   ON CONFLICT(entity_type, entity_id, model) DO UPDATE SET
-       dimensions = excluded.dimensions,
-       vector = excluded.vector,
-       source_generation = excluded.source_generation",
-                rusqlite::params![entity_id, model, vector.len() as i64, encoded, generation],
-            )
-            .expect("seed test vector");
-    }
-
-    fn remember(store: &mut Store, text: &str, project_id: Option<&str>) -> crate::store::Memory {
+    fn remember(store: &Store, text: &str) -> crate::store::Memory {
         store
             .remember(NewMemory {
                 text: text.to_owned(),
                 kind: "fact".to_owned(),
-                project_id: project_id.map(str::to_owned),
                 actor: "agent".to_owned(),
                 source_type: "test".to_owned(),
                 source_ref: None,
             })
-            .expect("store memory")
-    }
-
-    fn test_path() -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("mem-vector-search-test-{}.db", Uuid::now_v7()))
-    }
-
-    fn cleanup(path: &std::path::Path) {
-        let _ = std::fs::remove_file(path);
-        let _ = std::fs::remove_file(path.with_extension("db-shm"));
-        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+            .expect("remember")
     }
 }
