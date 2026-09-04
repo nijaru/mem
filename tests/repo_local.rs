@@ -186,3 +186,26 @@ fn context_max_bytes_is_a_hard_bound() {
     assert_eq!(value["memories"].as_array().map(Vec::len), Some(0));
     std::fs::remove_dir_all(cwd).unwrap();
 }
+
+#[test]
+fn version_and_status_report_build_identity() {
+    let cwd = temp_dir();
+    let status = run_json(&cwd, &["status"]);
+    let build = status["build_commit"]
+        .as_str()
+        .expect("status reports build_commit");
+    assert!(!build.trim().is_empty(), "build identity must not be empty");
+    let version = String::from_utf8_lossy(
+        &command(&cwd)
+            .arg("--version")
+            .output()
+            .expect("spawn mem")
+            .stdout,
+    )
+    .to_string();
+    assert!(
+        version.contains(build),
+        "--version must report the same build identity: {version}"
+    );
+    std::fs::remove_dir_all(cwd).unwrap();
+}
