@@ -508,7 +508,7 @@ fn run(cli: MemCli) -> Result<()> {
         Command::Index(command) => {
             let cache_dir = model_cache_dir()?;
             let stats = match Store::open_existing(&db_path)? {
-                Some(store) => store.run_embedding_index(EmbeddingRunOptions {
+                Some(mut store) => store.run_embedding_index(EmbeddingRunOptions {
                     limit: command.limit.unwrap_or(64).clamp(1, 1000),
                     cache_dir,
                     show_download_progress: !cli.json,

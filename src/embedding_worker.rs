@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
+use rusqlite::TransactionBehavior;
 use serde::Serialize;
 
 use crate::store::Store;
@@ -27,7 +28,10 @@ pub struct EmbeddingRunStats {
 }
 
 impl Store {
-    pub fn run_embedding_index(&self, options: EmbeddingRunOptions) -> Result<EmbeddingRunStats> {
+    pub fn run_embedding_index(
+        &mut self,
+        options: EmbeddingRunOptions,
+    ) -> Result<EmbeddingRunStats> {
         if options.limit == 0 {
             bail!("embedding limit must be greater than zero");
         }
@@ -66,8 +70,16 @@ impl Store {
             );
         }
 
+        // The whole batch commits or rolls back together: a mid-batch
+        // failure leaves all of the batch's vectors missing, so the next
+        // mem index retries the batch naturally instead of a partial run
+        // going undetected.
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         for (source, vector) in sources.iter().zip(embeddings) {
-            if self.upsert_embedding_if_current(
+            if Store::upsert_embedding_if_current(
+                &transaction,
                 &source.id,
                 source.updated_at,
                 EMBEDDING_MODEL_ID,
@@ -78,6 +90,7 @@ impl Store {
                 stats.stale += 1;
             }
         }
+        transaction.commit()?;
         stats.remaining = self.embedding_coverage(EMBEDDING_MODEL_ID)?.unindexed;
         Ok(stats)
     }
@@ -189,7 +202,7 @@ mod tests {
     #[test]
     fn cached_only_index_is_a_noop_when_model_is_absent() {
         let path = std::env::temp_dir().join(format!("mem-index-test-{}.db", Uuid::now_v7()));
-        let store = Store::open(&path).expect("open");
+        let mut store = Store::open(&path).expect("open");
         store
             .remember(NewMemory {
                 text: "pending semantic memory".to_owned(),

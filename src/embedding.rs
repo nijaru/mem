@@ -1,13 +1,13 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use rusqlite::params;
+use rusqlite::{Connection, params};
 
 use crate::store::Store;
 
 impl Store {
     pub(crate) fn upsert_embedding_if_current(
-        &self,
+        connection: &Connection,
         memory_id: &str,
         source_updated_at: i64,
         model: &str,
@@ -24,7 +24,7 @@ impl Store {
         let dimensions = i64::try_from(normalized.len())?;
         let now = unix_millis()?;
 
-        let changed = self.connection.execute(
+        let changed = connection.execute(
             "INSERT INTO embeddings (\n\
                  memory_id, model, dimensions, vector, source_updated_at, updated_at\n\
              )\n\
@@ -107,9 +107,14 @@ mod tests {
             })
             .expect("remember");
         assert!(
-            store
-                .upsert_embedding_if_current(&memory.id, memory.updated_at, "model", &[3.0, 4.0])
-                .expect("commit")
+            Store::upsert_embedding_if_current(
+                &store.connection,
+                &memory.id,
+                memory.updated_at,
+                "model",
+                &[3.0, 4.0],
+            )
+            .expect("commit")
         );
         store
             .connection
@@ -119,15 +124,76 @@ mod tests {
             )
             .expect("refresh");
         assert!(
-            !store
-                .upsert_embedding_if_current(&memory.id, memory.updated_at, "model", &[1.0, 0.0])
-                .expect("reject stale")
+            !Store::upsert_embedding_if_current(
+                &store.connection,
+                &memory.id,
+                memory.updated_at,
+                "model",
+                &[1.0, 0.0],
+            )
+            .expect("reject stale")
         );
         let count: i64 = store
             .connection
             .query_row("SELECT COUNT(*) FROM embeddings", [], |row| row.get(0))
             .expect("count");
         assert_eq!(count, 0);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_failed_upsert_rolls_back_the_whole_batch() {
+        let path = std::env::temp_dir().join(format!("mem-batch-test-{}.db", uuid::Uuid::now_v7()));
+        let mut store = Store::open(&path).expect("open");
+        let first = store
+            .remember(NewMemory {
+                text: "first memory".to_owned(),
+                kind: "fact".to_owned(),
+                actor: "agent".to_owned(),
+                source_type: "test".to_owned(),
+                source_ref: None,
+            })
+            .expect("remember first");
+        let second = store
+            .remember(NewMemory {
+                text: "second memory".to_owned(),
+                kind: "fact".to_owned(),
+                actor: "agent".to_owned(),
+                source_type: "test".to_owned(),
+                source_ref: None,
+            })
+            .expect("remember second");
+
+        // Mirror run_embedding_index: one Immediate transaction wrapping all
+        // upserts of the batch. The second vector is invalid, so the batch
+        // must roll back including the first, already-valid upsert.
+        let result = (|| -> anyhow::Result<()> {
+            let transaction = store
+                .connection
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            Store::upsert_embedding_if_current(
+                &transaction,
+                &first.id,
+                first.updated_at,
+                "model",
+                &[1.0, 0.0],
+            )?;
+            Store::upsert_embedding_if_current(
+                &transaction,
+                &second.id,
+                second.updated_at,
+                "model",
+                &[f32::NAN, 0.0],
+            )?;
+            transaction.commit()?;
+            Ok(())
+        })();
+        assert!(result.is_err(), "invalid vector must fail the batch");
+        let count: i64 = store
+            .connection
+            .query_row("SELECT COUNT(*) FROM embeddings", [], |row| row.get(0))
+            .expect("count");
+        assert_eq!(count, 0, "no partial vectors may survive a failed batch");
         let _ = std::fs::remove_file(path);
     }
 }

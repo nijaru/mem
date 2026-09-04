@@ -161,12 +161,22 @@ mod tests {
         let store = Store::open(&path).expect("open");
         let first = remember(&store, "first");
         let best = remember(&store, "best");
-        store
-            .upsert_embedding_if_current(&first.id, first.updated_at, "test", &[0.8, 0.2])
-            .expect("seed first");
-        store
-            .upsert_embedding_if_current(&best.id, best.updated_at, "test", &[1.0, 0.0])
-            .expect("seed best");
+        Store::upsert_embedding_if_current(
+            &store.connection,
+            &first.id,
+            first.updated_at,
+            "test",
+            &[0.8, 0.2],
+        )
+        .expect("seed first");
+        Store::upsert_embedding_if_current(
+            &store.connection,
+            &best.id,
+            best.updated_at,
+            "test",
+            &[1.0, 0.0],
+        )
+        .expect("seed best");
         let hits = store
             .semantic_search_by_vector(&[2.0, 0.0], "test", 10)
             .expect("search");
