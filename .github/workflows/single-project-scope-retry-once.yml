@@ -77,9 +77,6 @@ jobs:
 
           python3 /tmp/scope.py
 
-          # Mechanical cleanup after the structural transform. Keep this
-          # explicit so compile failures still expose any unanticipated API
-          # drift rather than hiding it behind broad regexes.
           python3 - <<'PY'
           from pathlib import Path
           import re
@@ -106,12 +103,13 @@ jobs:
 
           path = Path('src/main.rs')
           text = path.read_text()
-          old = '''    let project = ProjectContext::detect(None)?;
-          if let Some(root) = project.as_ref().and_then(|context| context.root.as_ref()) {'''.replace('\n          ', '\n')
-          new = '''    let project = ProjectContext::detect(None)?;
-          if let Some(root) = project.root.as_ref() {'''.replace('\n          ', '\n')
-          assert old in text, 'database path still expects optional project context'
-          text = text.replace(old, new, 1)
+          text, n = re.subn(
+              r'project\.as_ref\(\)\.and_then\(\|context\| context\.root\.as_ref\(\)\)',
+              'project.root.as_ref()',
+              text,
+              count=1,
+          )
+          assert n == 1, 'database path optional-project expression not found'
           path.write_text(text)
 
           for filename in ['tests/retrieval_eval.rs', 'tests/real_corpus_eval.rs', 'tests/heldout_eval.rs']:
@@ -119,9 +117,6 @@ jobs:
               text = path.read_text().replace('Some(PROJECT)', 'None')
               path.write_text(text)
 
-          # The retrieval-eval transform can delete the tiny wrapper while
-          # removing old scope plumbing; restore it without changing the
-          # environment-aware helper used by coverage tests.
           path = Path('tests/retrieval_eval.rs')
           text = path.read_text()
           if 'fn context_ids(db: &Path, query: &str, lexical: bool)' not in text:
@@ -135,9 +130,6 @@ jobs:
               text = text.replace(marker, wrapper + marker, 1)
           path.write_text(text)
 
-          # Project routing no longer exists, so the poisoning eval keeps the
-          # rank/status containment probes and drops only the obsolete
-          # cross-project sub-probe.
           path = Path('tests/heldout_eval.rs')
           text = path.read_text()
           start_marker = '    // The poisoned memory itself is retrievable (storage is neutral), but\n'
