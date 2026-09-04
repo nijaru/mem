@@ -36,6 +36,7 @@ jobs:
 
           path = Path('/tmp/scope.py')
           text = path.read_text()
+
           start = text.index("marker = '''        if self.schema_version()? == 4 {")
           end = text.index("text = text.replace('        project_id: row.get(0)?", start)
           replacement = '''needle = "\\n        let version = self.schema_version()?;\\n        if version != SCHEMA_VERSION {"
@@ -48,7 +49,14 @@ jobs:
               1,
           )
           '''.replace('\n          ', '\n')
-          path.write_text(text[:start] + replacement + text[end:])
+          text = text[:start] + replacement + text[end:]
+
+          old = r"r'        Command::Remember\(command\) => \{.*?\n        \}\n        Command::Correct'"
+          new = r"r'(?<=\n)[ \t]*Command::Remember\(command\) => \{.*?\n[ \t]*\}\n[ \t]*Command::Correct'"
+          assert old in text, "remember branch matcher not found"
+          text = text.replace(old, new, 1)
+
+          path.write_text(text)
           PY
 
           python3 /tmp/scope.py
