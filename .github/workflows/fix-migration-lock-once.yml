@@ -5,6 +5,7 @@ on:
     branches: ['agent/lean-core']
     paths:
       - .github/workflows/fix-migration-lock-once.yml
+  workflow_dispatch:
 
 permissions:
   contents: write
