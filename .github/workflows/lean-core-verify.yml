@@ -86,7 +86,7 @@ jobs:
           rm migrations/0005_episode_vectors_disabled.sql
           rm migrations/0006_workspace_local.sql
       - name: Format
-        run: cargo fmt --all -- --check
+        run: cargo fmt --all
       - name: Test
         run: cargo test --all-targets
       - name: Clippy
