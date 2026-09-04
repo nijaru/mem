@@ -341,7 +341,7 @@ fn run(cli: MemCli) -> Result<()> {
             }
             StateCommand::Set(command) => {
                 let workspace = crate::workspace::workspace_id(command.workspace.as_deref())?;
-                let store = Store::open(&db_path)?;
+                let mut store = Store::open(&db_path)?;
                 let state = store.update_workspace_state(WorkspaceStateUpdate {
                     workspace,
                     session: command.session,

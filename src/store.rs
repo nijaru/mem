@@ -292,7 +292,10 @@ impl Store {
             .optional()?)
     }
 
-    pub fn update_workspace_state(&self, input: WorkspaceStateUpdate) -> Result<WorkspaceState> {
+    pub fn update_workspace_state(
+        &mut self,
+        input: WorkspaceStateUpdate,
+    ) -> Result<WorkspaceState> {
         validate_identity(&input.workspace, "workspace")?;
         validate_optional(&input.session, "session")?;
         validate_optional(&input.goal, "goal")?;
@@ -329,7 +332,14 @@ impl Store {
         }
 
         let now = unix_millis()?;
-        self.connection.execute(
+        // Validation reads and the upsert must serialize as one unit: without
+        // the transaction a concurrent `state clear` between the existence
+        // check and the upsert can resurrect an emptied state row, and the
+        // "no state" error can go stale.
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute(
             "INSERT INTO workspace_state (workspace, session, goal, task, checkpoint, updated_at)\n\
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)\n\
              ON CONFLICT(workspace) DO UPDATE SET\n\
@@ -351,8 +361,16 @@ impl Store {
                 input.clear_fields.iter().any(|field| field == "checkpoint"),
             ],
         )?;
-        self.workspace_state(&input.workspace)?
-            .context("workspace state disappeared after write")
+        let state = transaction
+            .query_row(
+                "SELECT workspace, session, goal, task, checkpoint, updated_at\n\
+                 FROM workspace_state WHERE workspace = ?1",
+                [&input.workspace],
+                workspace_state_from_row,
+            )
+            .context("workspace state disappeared after write")?;
+        transaction.commit()?;
+        Ok(state)
     }
 
     pub fn clear_workspace_state(&self, workspace: &str) -> Result<bool> {
@@ -651,7 +669,7 @@ mod tests {
     #[test]
     fn workspace_state_set_is_partial_and_clear_is_explicit() {
         let path = test_path();
-        let store = Store::open(&path).expect("open");
+        let mut store = Store::open(&path).expect("open");
         store
             .update_workspace_state(WorkspaceStateUpdate {
                 workspace: "branch:main".to_owned(),
@@ -690,6 +708,72 @@ mod tests {
         }
         let store = Store::open(&path).expect("open final");
         assert_eq!(store.stats().expect("stats").active, 8);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn concurrent_state_sets_do_not_lose_writes() {
+        let path = test_path();
+        let mut joins = Vec::new();
+        for index in 0..8 {
+            let path = path.clone();
+            joins.push(std::thread::spawn(move || {
+                let mut store = Store::open(&path).expect("open writer");
+                store
+                    .update_workspace_state(WorkspaceStateUpdate {
+                        workspace: format!("branch:ws{index}").to_owned(),
+                        goal: Some(format!("goal {index}")).to_owned(),
+                        checkpoint: Some(format!("checkpoint {index}")).to_owned(),
+                        ..Default::default()
+                    })
+                    .expect("set state");
+            }));
+        }
+        for join in joins {
+            join.join().expect("join");
+        }
+        let store = Store::open(&path).expect("open final");
+        for index in 0..8 {
+            let state = store
+                .workspace_state(&format!("branch:ws{index}"))
+                .expect("read state")
+                .expect("state row survived concurrent writes");
+            assert_eq!(
+                state.goal.as_deref(),
+                Some(format!("goal {index}").as_str())
+            );
+        }
+        cleanup(&path);
+    }
+
+    #[test]
+    fn state_clear_cannot_race_set_into_resurrecting_a_row() {
+        // A clear-only update on an absent row must fail rather than
+        // recreate the row the clear just removed; the IMMEDIATE
+        // transaction keeps the existence check and the upsert consistent.
+        let path = test_path();
+        let mut store = Store::open(&path).expect("open");
+        store
+            .update_workspace_state(WorkspaceStateUpdate {
+                workspace: "branch:main".to_owned(),
+                goal: Some("ship".to_owned()),
+                ..Default::default()
+            })
+            .expect("seed");
+        assert!(store.clear_workspace_state("branch:main").expect("clear"));
+        // A clear-only update on an absent row must fail, not recreate it.
+        let result = store.update_workspace_state(WorkspaceStateUpdate {
+            workspace: "branch:main".to_owned(),
+            clear_fields: vec!["goal".to_owned()],
+            ..Default::default()
+        });
+        assert!(result.is_err());
+        assert!(
+            store
+                .workspace_state("branch:main")
+                .expect("read")
+                .is_none()
+        );
         cleanup(&path);
     }
 
