@@ -1,0 +1,396 @@
+name: overhaul-storage-once
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/overhaul-storage-once.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Apply repo-local storage slice
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          main = Path('src/main.rs')
+          text = main.read_text()
+
+          run_pattern = re.compile(
+              r"fn run\(cli: MemCli\) -> Result<\(\)> \{\n.*?\n    match cli\.command \{",
+              re.S,
+          )
+          run_replacement = '''fn run(cli: MemCli) -> Result<()> {
+              let explicit_db = cli.db.is_some()
+                  || std::env::var_os("MEM_DB")
+                      .filter(|path| !path.is_empty())
+                      .is_some();
+              let db_path = database_path(cli.db.as_deref())?;
+              if !explicit_db && command_writes(&cli.command) {
+                  ensure_local_ignore(&db_path)?;
+              }
+              let router = StorageRouter::exact(db_path.clone());
+
+              match cli.command {'''
+          text, count = run_pattern.subn(run_replacement, text, count=1)
+          assert count == 1, f'run() replacement count: {count}'
+
+          status_pattern = re.compile(
+              r"        Command::Init\(_\) \| Command::Status\(_\) => \{.*?\n        \}\n        Command::Project\(command\) => \{",
+              re.S,
+          )
+          status_replacement = '''        Command::Init(_) => {
+              let store = Store::open(&db_path)?;
+              let stats = store.stats()?;
+              let output = StatusOutput {
+                  database: db_path.display().to_string(),
+                  schema_version: stats.schema_version,
+                  total: stats.total,
+                  active: stats.active,
+                  superseded: stats.superseded,
+                  deleted: stats.deleted,
+              };
+              if cli.json {
+                  print_json(&output)?;
+              } else {
+                  println!("database: {}", output.database);
+                  println!("schema: {}", output.schema_version);
+                  println!(
+                      "memories: {} active / {} superseded / {} deleted / {} total",
+                      output.active, output.superseded, output.deleted, output.total
+                  );
+              }
+          }
+          Command::Status(_) => {
+              let output = match Store::open_existing(&db_path)? {
+                  Some(store) => {
+                      let stats = store.stats()?;
+                      StatusOutput {
+                          database: db_path.display().to_string(),
+                          schema_version: stats.schema_version,
+                          total: stats.total,
+                          active: stats.active,
+                          superseded: stats.superseded,
+                          deleted: stats.deleted,
+                      }
+                  }
+                  None => StatusOutput {
+                      database: db_path.display().to_string(),
+                      schema_version: 0,
+                      total: 0,
+                      active: 0,
+                      superseded: 0,
+                      deleted: 0,
+                  },
+              };
+              if cli.json {
+                  print_json(&output)?;
+              } else {
+                  println!("database: {}", output.database);
+                  if output.schema_version == 0 {
+                      println!("store: not initialized");
+                  } else {
+                      println!("schema: {}", output.schema_version);
+                      println!(
+                          "memories: {} active / {} superseded / {} deleted / {} total",
+                          output.active, output.superseded, output.deleted, output.total
+                      );
+                  }
+              }
+          }
+          Command::Project(command) => {'''
+          text, count = status_pattern.subn(status_replacement, text, count=1)
+          assert count == 1, f'init/status replacement count: {count}'
+
+          db_pattern = re.compile(
+              r"/// Resolve the exact-file override for this invocation\..*?\nfn print_json",
+              re.S,
+          )
+          db_replacement = '''/// Resolve the database for this invocation. Explicit overrides pin one
+          /// file. Otherwise `mem` uses `<project>/.mem/mem.db`, where an existing
+          /// `.mem/` directory wins and a Git root is the default project boundary.
+          fn database_path(override_path: Option<&Path>) -> Result<PathBuf> {
+              if let Some(path) = override_path {
+                  return Ok(path.to_owned());
+              }
+              if let Some(path) = std::env::var_os("MEM_DB").filter(|path| !path.is_empty()) {
+                  return Ok(PathBuf::from(path));
+              }
+
+              let cwd = std::env::current_dir().context("determine current directory")?;
+              for ancestor in cwd.ancestors() {
+                  let mem_dir = ancestor.join(".mem");
+                  if mem_dir.is_dir() {
+                      return Ok(mem_dir.join("mem.db"));
+                  }
+              }
+              if let Some(context) = ProjectContext::detect(None, None)?
+                  && let Some(root) = context.root
+              {
+                  return Ok(root.join(".mem").join("mem.db"));
+              }
+              Ok(cwd.join(".mem").join("mem.db"))
+          }
+
+          fn command_writes(command: &Command) -> bool {
+              match command {
+                  Command::Init(_) | Command::Remember(_) | Command::Correct(_) | Command::Forget(_) => true,
+                  Command::State(state) => !matches!(state.command, StateCommand::Show(_)),
+                  Command::Episode(episode) => !matches!(episode.command, EpisodeSubcommand::Get(_)),
+                  Command::Index(index) => !matches!(index.command, IndexSubcommand::Status(_)),
+                  _ => false,
+              }
+          }
+
+          fn ensure_local_ignore(db_path: &Path) -> Result<()> {
+              let directory = db_path
+                  .parent()
+                  .context("local memory database has no parent directory")?;
+              std::fs::create_dir_all(directory)
+                  .with_context(|| format!("create local memory directory {}", directory.display()))?;
+              let ignore = directory.join(".gitignore");
+              if !ignore.exists() {
+                  std::fs::write(&ignore, "*\\n")
+                      .with_context(|| format!("write {}", ignore.display()))?;
+              }
+              Ok(())
+          }
+
+          fn print_json'''
+          text, count = db_pattern.subn(db_replacement, text, count=1)
+          assert count == 1, f'database_path replacement count: {count}'
+          main.write_text(text)
+
+          storage = Path('src/storage.rs')
+          text = storage.read_text()
+          replacements = [
+              (
+                  '''    if let StorageRouter::Exact(path) = router {
+              let store = Store::open(path)?;
+              return crate::recall_hits(&store, query, project_id, limit, force_lexical);
+          }''',
+                  '''    if let StorageRouter::Exact(path) = router {
+              let Some(store) = Store::open_existing(path)? else {
+                  return Ok(Vec::new());
+              };
+              return crate::recall_hits(&store, query, project_id, limit, force_lexical);
+          }''',
+              ),
+              (
+                  '''    if let StorageRouter::Exact(path) = router {
+              let store = Store::open(path)?;
+              return store.search(query, project_id, limit);
+          }''',
+                  '''    if let StorageRouter::Exact(path) = router {
+              let Some(store) = Store::open_existing(path)? else {
+                  return Ok(Vec::new());
+              };
+              return store.search(query, project_id, limit);
+          }''',
+              ),
+              (
+                  '''    if let StorageRouter::Exact(path) = router {
+              let store = Store::open(path)?;
+              return store.semantic_search_by_vector(
+                  query_vector,
+                  crate::embedding_worker::EMBEDDING_MODEL_ID,
+                  project_id,
+                  limit,
+              );
+          }''',
+                  '''    if let StorageRouter::Exact(path) = router {
+              let Some(store) = Store::open_existing(path)? else {
+                  return Ok(Vec::new());
+              };
+              return store.semantic_search_by_vector(
+                  query_vector,
+                  crate::embedding_worker::EMBEDDING_MODEL_ID,
+                  project_id,
+                  limit,
+              );
+          }''',
+              ),
+              (
+                  '''        (StorageRouter::Exact(path), _) => Store::open(path)?,''',
+                  '''        (StorageRouter::Exact(path), _) => {
+              let Some(store) = Store::open_existing(path)? else {
+                  return Ok(Vec::new());
+              };
+              store
+          },''',
+              ),
+              (
+                  '''        StorageRouter::Exact(path) => {
+              let store = Store::open(path)?;
+              store.workspace_state(project_id, workspace_id)
+          }''',
+                  '''        StorageRouter::Exact(path) => match Store::open_existing(path)? {
+              Some(store) => store.workspace_state(project_id, workspace_id),
+              None => Ok(None),
+          }''',
+              ),
+          ]
+          for old, new in replacements:
+              assert old in text, f'missing storage snippet: {old[:80]!r}'
+              text = text.replace(old, new, 1)
+          storage.write_text(text)
+
+          test = Path('tests/managed_default.rs')
+          test.write_text(r'''//! Integration coverage for repo-local default storage.
+
+          use std::path::{Path, PathBuf};
+          use std::process::{Command, Output};
+          use uuid::Uuid;
+
+          fn temp_dir() -> PathBuf {
+              let path = std::env::temp_dir().join(format!("mem-repo-local-{}", Uuid::now_v7()));
+              std::fs::create_dir_all(&path).expect("create temp dir");
+              path
+          }
+
+          fn run(cwd: &Path, args: &[&str]) -> Output {
+              let mut command = Command::new(env!("CARGO_BIN_EXE_mem"));
+              command
+                  .current_dir(cwd)
+                  .env_remove("MEM_DB")
+                  .env_remove("MEM_HOME")
+                  .args(args);
+              command.output().expect("spawn mem")
+          }
+
+          fn run_json(cwd: &Path, args: &[&str]) -> serde_json::Value {
+              let mut command = Command::new(env!("CARGO_BIN_EXE_mem"));
+              command
+                  .current_dir(cwd)
+                  .env_remove("MEM_DB")
+                  .env_remove("MEM_HOME")
+                  .arg("--json")
+                  .args(args);
+              let output = command.output().expect("spawn mem");
+              assert!(
+                  output.status.success(),
+                  "stderr: {}",
+                  String::from_utf8_lossy(&output.stderr)
+              );
+              serde_json::from_slice(&output.stdout).expect("parse JSON")
+          }
+
+          #[test]
+          fn init_creates_repo_local_store_and_private_gitignore() {
+              let cwd = temp_dir();
+              let value = run_json(&cwd, &["init"]);
+              let db = cwd.join(".mem/mem.db");
+              assert!(db.is_file());
+              assert_eq!(value["database"], db.display().to_string());
+              assert_eq!(
+                  std::fs::read_to_string(cwd.join(".mem/.gitignore")).expect("read ignore"),
+                  "*\n"
+              );
+              std::fs::remove_dir_all(cwd).expect("cleanup");
+          }
+
+          #[test]
+          fn status_is_read_only_when_store_is_absent() {
+              let cwd = temp_dir();
+              let value = run_json(&cwd, &["status"]);
+              assert_eq!(value["schema_version"], 0);
+              assert_eq!(value["total"], 0);
+              assert!(!cwd.join(".mem").exists(), "status must not initialize storage");
+              std::fs::remove_dir_all(cwd).expect("cleanup");
+          }
+
+          #[test]
+          fn retrieval_reads_do_not_initialize_storage() {
+              let cwd = temp_dir();
+              let search = run_json(&cwd, &["search", "nothing", "--global"]);
+              assert_eq!(search.as_array().map(Vec::len), Some(0));
+              let context = run_json(&cwd, &["context", "nothing"]);
+              assert_eq!(context["memories"].as_array().map(Vec::len), Some(0));
+              assert!(!cwd.join(".mem").exists(), "reads must not initialize storage");
+              std::fs::remove_dir_all(cwd).expect("cleanup");
+          }
+
+          #[test]
+          fn a_write_initializes_repo_local_storage_without_init() {
+              let cwd = temp_dir();
+              let value = run_json(
+                  &cwd,
+                  &["remember", "repo-local memory", "--global", "--source-type", "test"],
+              );
+              assert_eq!(value["text"], "repo-local memory");
+              assert!(cwd.join(".mem/mem.db").is_file());
+              assert!(cwd.join(".mem/.gitignore").is_file());
+              std::fs::remove_dir_all(cwd).expect("cleanup");
+          }
+
+          #[test]
+          fn explicit_database_bypasses_repo_local_storage() {
+              let cwd = temp_dir();
+              let db = cwd.join("exact.db");
+              let output = Command::new(env!("CARGO_BIN_EXE_mem"))
+                  .current_dir(&cwd)
+                  .env_remove("MEM_DB")
+                  .env_remove("MEM_HOME")
+                  .args([
+                      "--db",
+                      db.to_str().expect("utf8 path"),
+                      "remember",
+                      "exact memory",
+                      "--global",
+                      "--source-type",
+                      "test",
+                  ])
+                  .output()
+                  .expect("spawn mem");
+              assert!(
+                  output.status.success(),
+                  "stderr: {}",
+                  String::from_utf8_lossy(&output.stderr)
+              );
+              assert!(db.is_file());
+              assert!(!cwd.join(".mem").exists());
+              std::fs::remove_dir_all(cwd).expect("cleanup");
+          }
+
+          #[test]
+          fn nested_commands_reuse_nearest_existing_mem_directory() {
+              let root = temp_dir();
+              let nested = root.join("a/b/c");
+              std::fs::create_dir_all(&nested).expect("nested dirs");
+              let init = run(&root, &["init"]);
+              assert!(init.status.success());
+              let value = run_json(&nested, &["status"]);
+              assert_eq!(value["database"], root.join(".mem/mem.db").display().to_string());
+              std::fs::remove_dir_all(root).expect("cleanup");
+          }
+          ''')
+          PY
+
+          cargo fmt --all
+          cargo test --all-targets
+          cargo clippy --all-targets -- -D warnings
+          git diff --check
+      - name: Commit verified storage overhaul
+        shell: bash
+        run: |
+          rm .github/workflows/overhaul-storage-once.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "refactor: make mem storage repo-local"
+          git push origin HEAD:main
