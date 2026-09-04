@@ -61,47 +61,47 @@ jobs:
           path = Path('src/store.rs')
           text = path.read_text()
           start = text.index("    fn migrate(&self) -> Result<()> {")
-end = text.index("    fn schema_version(&self) -> Result<i64> {", start)
-replacement = r'''    fn migrate(&self) -> Result<()> {
-    self.connection.execute_batch("BEGIN IMMEDIATE;")?;
-    let result = (|| -> Result<()> {
-        let version = self.schema_version()?;
-        if version > SCHEMA_VERSION {
-            bail!(
-                "database schema version {version} is newer than supported version {SCHEMA_VERSION}"
-            );
-        }
-        match version {
-            0 => self.connection.execute_batch(include_str!("../migrations/schema.sql"))?,
-            6 => self
-                .connection
-                .execute_batch(include_str!("../migrations/0007_lean_core.sql"))?,
-            7 => {}
-            1..=5 => bail!(
-                "database schema version {version} is from an unsupported pre-1.0 build; upgrade it to v6 with the previous mem build first"
-            ),
-            _ => unreachable!(),
-        }
-        let version = self.schema_version()?;
-        if version != SCHEMA_VERSION {
-            bail!("failed to migrate database to schema version {SCHEMA_VERSION}; got {version}");
-        }
-        Ok(())
-    })();
-    match result {
-        Ok(()) => {
-            self.connection.execute_batch("COMMIT;")?;
-            Ok(())
-        }
-        Err(error) => {
-            let _ = self.connection.execute_batch("ROLLBACK;");
-            Err(error)
-        }
-    }
-}
+          end = text.index("    fn schema_version(&self) -> Result<i64> {", start)
+          replacement = r'''    fn migrate(&self) -> Result<()> {
+              self.connection.execute_batch("BEGIN IMMEDIATE;")?;
+              let result = (|| -> Result<()> {
+                  let version = self.schema_version()?;
+                  if version > SCHEMA_VERSION {
+                      bail!(
+                          "database schema version {version} is newer than supported version {SCHEMA_VERSION}"
+                      );
+                  }
+                  match version {
+                      0 => self.connection.execute_batch(include_str!("../migrations/schema.sql"))?,
+                      6 => self
+                          .connection
+                          .execute_batch(include_str!("../migrations/0007_lean_core.sql"))?,
+                      7 => {}
+                      1..=5 => bail!(
+                          "database schema version {version} is from an unsupported pre-1.0 build; upgrade it to v6 with the previous mem build first"
+                      ),
+                      _ => unreachable!(),
+                  }
+                  let version = self.schema_version()?;
+                  if version != SCHEMA_VERSION {
+                      bail!("failed to migrate database to schema version {SCHEMA_VERSION}; got {version}");
+                  }
+                  Ok(())
+              })();
+              match result {
+                  Ok(()) => {
+                      self.connection.execute_batch("COMMIT;")?;
+                      Ok(())
+                  }
+                  Err(error) => {
+                      let _ = self.connection.execute_batch("ROLLBACK;");
+                      Err(error)
+                  }
+              }
+          }
 
-'''
-path.write_text(text[:start] + replacement + text[end:])
+          '''
+          path.write_text(text[:start] + replacement + text[end:])
 
           Path('tests/retrieval_eval.rs').write_text(r'''use std::collections::{HashMap, HashSet};
           use std::path::{Path, PathBuf};
