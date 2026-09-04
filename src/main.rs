@@ -232,6 +232,7 @@ struct StatusOutput {
     schema_version: i64,
     root: Option<PathBuf>,
     workspace: String,
+    build_commit: &'static str,
     total: u64,
     active: u64,
     superseded: u64,
@@ -292,7 +293,11 @@ fn parse_cli(argv: &[String]) -> Option<MemCli> {
             None
         }
         Err(usage::Error::Version { .. }) => {
-            println!("mem {}", env!("CARGO_PKG_VERSION"));
+            println!(
+                "mem {} (built from {})",
+                env!("CARGO_PKG_VERSION"),
+                env!("MEM_BUILD_COMMIT")
+            );
             None
         }
         Err(error) => {
@@ -569,6 +574,7 @@ fn store_status(path: &Path, store: Option<&Store>) -> Result<StatusOutput> {
             schema_version: 0,
             root,
             workspace,
+            build_commit: env!("MEM_BUILD_COMMIT"),
             total: 0,
             active: 0,
             superseded: 0,
@@ -585,6 +591,7 @@ fn store_status(path: &Path, store: Option<&Store>) -> Result<StatusOutput> {
         schema_version: stats.schema_version,
         root,
         workspace,
+        build_commit: env!("MEM_BUILD_COMMIT"),
         total: stats.total,
         active: stats.active,
         superseded: stats.superseded,
@@ -603,6 +610,7 @@ fn print_status(output: &StatusOutput, json: bool) -> Result<()> {
         println!("root: {}", root.display());
     }
     println!("workspace: {}", output.workspace);
+    println!("build: {}", output.build_commit);
     if !output.initialized {
         println!("store: not initialized");
         return Ok(());
