@@ -4,43 +4,36 @@
 
 ## Product direction
 
-`mem` is a small persistent project-memory layer. Its job is to preserve high-value project knowledge after it falls out of the model's current context window.
+`mem` is a small persistent project-memory layer. Preserve high-value project knowledge after it falls out of the model's current context window.
 
-Target the simplest design that improves cross-session continuity:
-
-- normal storage is repo-local at `.mem/mem.db` (or an explicitly initialized local project directory outside Git);
-- `.mem/` is ignored by Git by default; users may copy/snapshot stores explicitly when needed;
-- `--db` / `MEM_DB` remain the explicit exact-database escape hatch;
-- do not depend on GitHub, hosted project systems, `ai/`, `agent-context/`, or any agent-runtime-specific storage location;
-- do not add sync, import/export formats, daemons, generic storage backends, or hosted services without demonstrated need;
-- project isolation is physical by default: one local database per project, no automatic cross-project recall;
-- keep one agent-facing retrieval path. The agent should not need to choose between lexical, semantic, fast, deep, or history retrieval modes;
-- retrieved context must stay small and high-signal. It is valid to return no memories when relevance is weak;
-- persist promoted durable knowledge, not raw chain-of-thought or exhaustive session transcripts. Useful kinds include facts/findings, decisions, constraints, research notes, preferences, procedures, and compact checkpoints;
-- retain provenance when available so an agent can understand where a memory came from;
-- corrections are non-destructive: current knowledge must be distinguishable from superseded knowledge.
-
-The current centralized managed-layout, global/user store, Git-remote project identity, episodic session archive, and worker-style indexing machinery are implementation history, not product requirements. Prefer removing them when the repo-local design makes them unnecessary rather than preserving them for compatibility at v0.0.x.
+- Normal storage is repo-local at `.mem/mem.db` (or an explicitly selected `--db` / `MEM_DB` file).
+- Project isolation is physical: one database per project and no automatic cross-project recall.
+- Keep one agent-facing retrieval path: `mem context`.
+- Retrieved context stays small and high-signal; returning no memory is valid when relevance is weak.
+- Persist promoted durable knowledge, not raw chain-of-thought, exhaustive transcripts, task state, or duplicated documents.
+- Retain lightweight provenance so recalled knowledge can be traced to its source.
+- Corrections are non-destructive: current knowledge remains distinguishable from superseded knowledge.
+- Add sync, daemons, generic backends, richer provenance graphs, or approximate vector indexes only after a concrete workflow or profile demonstrates the need.
 
 ## Core implementation constraints
 
-- The crates.io package is `mem-cli`; the user-facing executable is `mem`.
-- Rust 1.98 is the pinned toolchain.
-- SQLite via bundled `rusqlite` is the canonical store.
-- FTS5 must remain usable without embeddings.
-- Embeddings/vector indexes are derived and rebuildable; incomplete derived state must never hide canonical memories.
-- Every multi-statement write transaction uses IMMEDIATE, never deferred: a deferred upgrade can fail at COMMIT with `SQLITE_BUSY_SNAPSHOT`, which the busy timeout does not retry.
-- Keep retrieval/storage policy in the Rust core and keep the CLI runtime-agnostic.
-- Prefer deletion and simplification over preserving abstractions that no longer serve the product.
+- The crates.io package is `mem-cli`; the executable is `mem`.
+- Rust 1.98 is pinned.
+- Bundled SQLite via `rusqlite` is canonical; FTS5 must work without embeddings.
+- Embeddings are derived and rebuildable. Incomplete derived state must never hide active canonical memories.
+- Multi-statement writes use IMMEDIATE transactions so concurrent writers serialize before doing work.
+- Keep retrieval/storage policy in Rust and the CLI runtime-agnostic.
+- Prefer direct code and deletion over speculative abstractions or compatibility machinery while pre-1.0.
 
 ## Development
 
-Before committing code changes, run when available:
+Before landing code changes:
 
 ```bash
 cargo fmt --all -- --check
 cargo test --all-targets
 cargo clippy --all-targets -- -D warnings
+cargo build --release
 ```
 
-Prefer small vertical slices with tests over speculative abstractions. Retrieval changes should be justified by held-out/project-realistic evals, especially precision, supersession behavior, irrelevant-query abstention, and performance under a small context budget.
+Retrieval changes should be justified with held-out/project-realistic evals, especially precision, supersession behavior, irrelevant-query abstention, and small context budgets.
