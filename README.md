@@ -42,6 +42,8 @@ mem index
 mem index --cached-only
 ```
 
+`get` reads any record including superseded ones; `correct` and `forget` operate only on active memories, so supersession lineage stays immutable. `mem --version` and `status` report the commit the binary was built from, so a stale installed binary is detectable.
+
 `remember` and `state set` initialize the repo-local store automatically; `init` is the explicit setup command. `.mem/` is ignored by Git by default. `--db /path/to/file.db` and `MEM_DB` pin an exact database for tests or isolated profiles.
 
 ## Retrieval

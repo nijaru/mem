@@ -25,6 +25,8 @@ permissions:
 
 jobs:
   retrieval:
+    # Pinned runner: eval numbers gate retrieval changes, and image drift
+    # (glibc/CPU generation) can shift embedding numerics between runs.
     runs-on: ubuntu-22.04
     env:
       MEM_MODEL_CACHE: ${{ github.workspace }}/.model-cache
