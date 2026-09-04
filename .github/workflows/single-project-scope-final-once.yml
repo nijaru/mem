@@ -42,6 +42,7 @@ jobs:
           helper_lines = [
               "python3 - <<'PY2'",
               "from pathlib import Path",
+              "import re",
               "",
               "path = Path('src/index_job.rs')",
               "text = path.read_text()",
@@ -64,7 +65,8 @@ jobs:
               "",
               "path = Path('tests/retrieval_eval.rs')",
               "text = path.read_text()",
-              "text = text.replace('    let args = vec![\\n        \\\"remember\\\".to_owned(),\\n        seed.text.to_owned(),', '    let args = [\\n        \\\"remember\\\".to_owned(),\\n        seed.text.to_owned(),', 1)",
+              "text, n = re.subn(r'(fn remember\\(db: &Path, seed: &Seed<\\x27_>\\) -> Value \\{\\n\\s*)let args = vec!\\[', r'\\1let args = [', text, count=1)",
+              "assert n == 1, 'retrieval eval remember vector not found'",
               "path.write_text(text)",
               "",
               "path = Path('tests/real_corpus_eval.rs')",
