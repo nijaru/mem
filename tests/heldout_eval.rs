@@ -442,7 +442,7 @@ fn remember(db: &Path, seed: &Seed<'_>) -> Value {
 
 fn context_ids(db: &Path, query: &str, lexical: bool) -> Vec<String> {
     let limit = LIMIT.to_string();
-    let mut args = vec![
+    let args = [
         "context".to_owned(),
         query.to_owned(),
         "--project".to_owned(),
@@ -451,7 +451,7 @@ fn context_ids(db: &Path, query: &str, lexical: bool) -> Vec<String> {
         limit,
     ];
     if lexical {
-        args.push("--lexical".to_owned());
+        return lexical_ids(db, query);
     }
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
     run_json(db, &refs)["memories"]
@@ -462,6 +462,16 @@ fn context_ids(db: &Path, query: &str, lexical: bool) -> Vec<String> {
         .collect()
 }
 
+fn lexical_ids(db: &Path, query: &str) -> Vec<String> {
+    let limit = LIMIT.to_string();
+    let output = run_json(db, &["search", query, "--project", PROJECT, "-n", &limit]);
+    output
+        .as_array()
+        .expect("lexical search array")
+        .iter()
+        .map(|item| item["memory"]["id"].as_str().expect("id").to_owned())
+        .collect()
+}
 fn semantic_ids(db: &Path, query: &str) -> Vec<String> {
     let limit = LIMIT.to_string();
     let output = run_json(

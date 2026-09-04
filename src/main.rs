@@ -204,10 +204,6 @@ struct ContextCommand {
     /// hit that would exceed it. Default 32768; 0 disables the budget.
     #[usage(long)]
     max_bytes: Option<usize>,
-
-    /// Force FTS5 lexical recall instead of semantic-first ranking.
-    #[usage(long)]
-    lexical: bool,
 }
 
 /// Store one durable semantic memory.
@@ -694,7 +690,7 @@ fn run(cli: MemCli) -> Result<()> {
                 project_id,
                 &command.query,
                 limit,
-                command.lexical,
+                false,
             )?;
             // Rank order, byte-bounded: a single huge memory can no longer
             // crowd an adapter's context window. The first hit is always
@@ -1250,28 +1246,6 @@ mod cli_parse_tests {
         assert_eq!(command.source_type.as_deref(), Some("cli"));
         assert_eq!(command.source_ref.as_deref(), Some("r"));
         assert!(command.project.is_none());
-    }
-
-    #[test]
-    fn context_flags_and_budget_defaults() {
-        let cli = parse("context query --project p --workspace w -n 4 --max-bytes 1024 --lexical");
-        let Command::Context(command) = &cli.command else {
-            panic!("expected context");
-        };
-        assert_eq!(command.query, "query");
-        assert_eq!(command.project.as_deref(), Some("p"));
-        assert_eq!(command.workspace.as_deref(), Some("w"));
-        assert_eq!(command.limit, Some(4));
-        assert_eq!(command.max_bytes, Some(1024));
-        assert!(command.lexical);
-
-        let bare = parse("context q");
-        let Command::Context(command) = &bare.command else {
-            panic!("expected context");
-        };
-        assert_eq!(command.limit, None);
-        assert_eq!(command.max_bytes, None);
-        assert!(!command.lexical);
     }
 
     #[test]
