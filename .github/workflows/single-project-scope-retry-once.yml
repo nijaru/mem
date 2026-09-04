@@ -1,0 +1,71 @@
+name: single-project-scope-retry-once
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/single-project-scope-retry-once.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Run corrected scope collapse
+        shell: bash
+        run: |
+          set -euo pipefail
+          awk '
+            /python3 - <<'"'"'PY'"'"'/ { capture=1; next }
+            capture && /^          PY$/ { capture=0; exit }
+            capture { sub(/^          /, ""); print }
+          ' .github/workflows/single-project-scope-once.yml > /tmp/scope.py
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('/tmp/scope.py')
+          text = path.read_text()
+          start = text.index("marker = '''        if self.schema_version()? == 4 {")
+          end = text.index("text = text.replace('        project_id: row.get(0)?", start)
+          replacement = '''needle = "\\n        let version = self.schema_version()?;\\n        if version != SCHEMA_VERSION {"
+          assert needle in text, "final schema-version check not found"
+          text = text.replace(
+              needle,
+              "\\n        if self.schema_version()? == 5 {\\n"
+              "            apply(include_str!(\\\"../migrations/0006_workspace_local.sql\\\"), 5)?;\\n"
+              "        }\\n" + needle,
+              1,
+          )
+          '''.replace('\n          ', '\n')
+          path.write_text(text[:start] + replacement + text[end:])
+          PY
+
+          python3 /tmp/scope.py
+          cargo fmt --all
+          cargo test --all-targets
+          cargo clippy --all-targets -- -D warnings
+          cargo build --release
+          git diff --check
+      - name: Commit verified scope collapse
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm .github/workflows/single-project-scope-once.yml
+          rm .github/workflows/single-project-scope-retry-once.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "refactor: collapse logical project scope"
+          git pull --rebase origin main
+          git push origin HEAD:main
