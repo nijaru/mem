@@ -279,22 +279,10 @@ impl StorageRouter {
         Self::Exact(path)
     }
 
-    pub fn managed() -> Result<Self> {
-        Ok(Self::Managed(ManagedLayout::resolve()?))
-    }
-
     /// Test-only constructor against an explicit managed root.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn managed_at(home: PathBuf) -> Self {
         Self::Managed(ManagedLayout::at(home))
-    }
-
-    /// The managed layout this router uses. Exact-file routers have none.
-    pub fn managed_layout(&self) -> &ManagedLayout {
-        match self {
-            Self::Managed(layout) => layout,
-            Self::Exact(_) => panic!("managed_layout on an exact-file router"),
-        }
     }
 
     /// The single store a canonical write must go to, created on demand.
@@ -313,10 +301,13 @@ impl StorageRouter {
     /// the query filter; the user store carries the global filter.
     pub fn scope_stores(&self, project_id: Option<&str>) -> Result<Vec<ScopedStore>> {
         match self {
-            Self::Exact(path) => Ok(vec![ScopedStore {
-                store: Store::open(path)?,
-                project_filter: project_id.map(str::to_owned),
-            }]),
+            Self::Exact(path) => match Store::open_existing(path)? {
+                Some(store) => Ok(vec![ScopedStore {
+                    store,
+                    project_filter: project_id.map(str::to_owned),
+                }]),
+                None => Ok(Vec::new()),
+            },
             Self::Managed(layout) => {
                 let mut scoped = Vec::new();
                 if let Some(project) = project_id
@@ -342,7 +333,10 @@ impl StorageRouter {
     /// user store first, then every existing managed project database.
     fn id_search_stores(&self, project_hint: Option<&str>) -> Result<Vec<Store>> {
         match self {
-            Self::Exact(path) => Ok(vec![Store::open(path)?]),
+            Self::Exact(path) => match Store::open_existing(path)? {
+                Some(store) => Ok(vec![store]),
+                None => Ok(Vec::new()),
+            },
             Self::Managed(layout) => {
                 let mut stores = Vec::new();
                 if let Some(project_id) = project_hint
@@ -472,7 +466,9 @@ pub fn routed_recall_hits(
     force_lexical: bool,
 ) -> Result<Vec<SearchHit>> {
     if let StorageRouter::Exact(path) = router {
-        let store = Store::open(path)?;
+        let Some(store) = Store::open_existing(path)? else {
+            return Ok(Vec::new());
+        };
         return crate::recall_hits(&store, query, project_id, limit, force_lexical);
     }
 
@@ -546,7 +542,9 @@ pub fn routed_lexical_search(
     limit: usize,
 ) -> Result<Vec<SearchHit>> {
     if let StorageRouter::Exact(path) = router {
-        let store = Store::open(path)?;
+        let Some(store) = Store::open_existing(path)? else {
+            return Ok(Vec::new());
+        };
         return store.search(query, project_id, limit);
     }
     let stores = router.scope_stores(project_id)?;
@@ -573,7 +571,9 @@ pub fn routed_semantic_search(
     limit: usize,
 ) -> Result<Vec<SemanticSearchHit>> {
     if let StorageRouter::Exact(path) = router {
-        let store = Store::open(path)?;
+        let Some(store) = Store::open_existing(path)? else {
+            return Ok(Vec::new());
+        };
         return store.semantic_search_by_vector(
             query_vector,
             crate::embedding_worker::EMBEDDING_MODEL_ID,
@@ -612,7 +612,12 @@ pub fn routed_history_search(
     limit: usize,
 ) -> Result<Vec<HistoryHit>> {
     let store = match (router, project_id) {
-        (StorageRouter::Exact(path), _) => Store::open(path)?,
+        (StorageRouter::Exact(path), _) => {
+            let Some(store) = Store::open_existing(path)? else {
+                return Ok(Vec::new());
+            };
+            store
+        }
         (StorageRouter::Managed(layout), Some(project)) => {
             let path = layout.project_db(project)?.path;
             let Some(store) = open_if_exists(&path)? else {
@@ -638,10 +643,10 @@ pub fn routed_workspace_state(
     workspace_id: &str,
 ) -> Result<Option<WorkspaceState>> {
     match router {
-        StorageRouter::Exact(path) => {
-            let store = Store::open(path)?;
-            store.workspace_state(project_id, workspace_id)
-        }
+        StorageRouter::Exact(path) => match Store::open_existing(path)? {
+            Some(store) => store.workspace_state(project_id, workspace_id),
+            None => Ok(None),
+        },
         StorageRouter::Managed(layout) => {
             let path = layout.project_db(project_id)?.path;
             match open_if_exists(&path)? {
@@ -1446,6 +1451,7 @@ mod routing_tests {
     #[test]
     fn managed_index_run_never_creates_missing_stores() {
         let home = test_home();
+        let layout = super::ManagedLayout::at(home.clone());
         let router = StorageRouter::managed_at(home.clone());
 
         // Only the user store exists. A scoped run referencing a project
@@ -1463,8 +1469,7 @@ mod routing_tests {
                 .expect("routed index run");
         assert_eq!(stats.stores, 2, "scoped run still counts both paths");
         assert!(
-            !router
-                .managed_layout()
+            !layout
                 .project_db("github.com/x/never-created")
                 .expect("resolve project db")
                 .path
@@ -1478,6 +1483,7 @@ mod routing_tests {
     #[test]
     fn storage_status_reports_without_creating_files() {
         let home = test_home();
+        let layout = super::ManagedLayout::at(home.clone());
         let router = StorageRouter::managed_at(home.clone());
 
         let mut project = router
@@ -1489,8 +1495,7 @@ mod routing_tests {
         drop(project);
         drop(user);
 
-        let layout = router.managed_layout();
-        let report = super::storage_status_report(layout).expect("status report");
+        let report = super::storage_status_report(&layout).expect("status report");
         assert!(report.layout_exists);
         assert_eq!(report.layout_version, "layout-v1");
         assert!(!report.legacy_db_exists);

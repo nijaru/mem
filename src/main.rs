@@ -676,45 +676,19 @@ fn parse_cli(argv: &[String]) -> Option<MemCli> {
 const RECALL_DEFAULT_MAX_BYTES: usize = 32 * 1024;
 
 fn run(cli: MemCli) -> Result<()> {
-    // Exact-file bypass: --db/MEM_DB pins every operation to one database.
-    // Otherwise the managed layout is the default. A legacy memory.db that
-    // still exists without an active layout is an explicit migration source:
-    // storage commands surface the migrate guidance instead of silently
-    // splitting usage between the legacy file and an empty new layout.
-    let router = match database_path(cli.db.as_deref()) {
-        Ok(path) => StorageRouter::exact(path),
-        Err(_) => {
-            let router = StorageRouter::managed()?;
-            if matches!(
-                cli.command,
-                Command::Storage(StorageCommand {
-                    command: StorageSubcommand::Status(_) | StorageSubcommand::Migrate(_)
-                }) | Command::Project(_)
-            ) {
-                // Inventory, migration, and project identity stay usable.
-                router
-            } else {
-                let layout = router.managed_layout();
-                if layout.legacy_db().is_file() && !layout.layout_dir().is_dir() {
-                    bail!(
-                        "legacy store {} exists but the managed layout is not active; \
-                         run `mem storage migrate` (or `mem storage status`) to move it into {}",
-                        layout.legacy_db().display(),
-                        layout.layout_dir().display()
-                    );
-                }
-                router
-            }
-        }
-    };
-    let db_path = match &router {
-        StorageRouter::Exact(path) => path.clone(),
-        StorageRouter::Managed(layout) => layout.user_db(),
-    };
+    let explicit_db = cli.db.is_some()
+        || std::env::var_os("MEM_DB")
+            .filter(|path| !path.is_empty())
+            .is_some();
+    let db_path = database_path(cli.db.as_deref())?;
+    if !explicit_db && command_writes(&cli.command) {
+        ensure_local_ignore(&db_path)?;
+    }
+    let router = StorageRouter::exact(db_path.clone());
 
     match cli.command {
-        Command::Init(_) | Command::Status(_) => {
-            let store = router.write_store(None)?;
+        Command::Init(_) => {
+            let store = Store::open(&db_path)?;
             let stats = store.stats()?;
             let output = StatusOutput {
                 database: db_path.display().to_string(),
@@ -733,6 +707,43 @@ fn run(cli: MemCli) -> Result<()> {
                     "memories: {} active / {} superseded / {} deleted / {} total",
                     output.active, output.superseded, output.deleted, output.total
                 );
+            }
+        }
+        Command::Status(_) => {
+            let output = match Store::open_existing(&db_path)? {
+                Some(store) => {
+                    let stats = store.stats()?;
+                    StatusOutput {
+                        database: db_path.display().to_string(),
+                        schema_version: stats.schema_version,
+                        total: stats.total,
+                        active: stats.active,
+                        superseded: stats.superseded,
+                        deleted: stats.deleted,
+                    }
+                }
+                None => StatusOutput {
+                    database: db_path.display().to_string(),
+                    schema_version: 0,
+                    total: 0,
+                    active: 0,
+                    superseded: 0,
+                    deleted: 0,
+                },
+            };
+            if cli.json {
+                print_json(&output)?;
+            } else {
+                println!("database: {}", output.database);
+                if output.schema_version == 0 {
+                    println!("store: not initialized");
+                } else {
+                    println!("schema: {}", output.schema_version);
+                    println!(
+                        "memories: {} active / {} superseded / {} deleted / {} total",
+                        output.active, output.superseded, output.deleted, output.total
+                    );
+                }
             }
         }
         Command::Project(command) => {
@@ -1558,10 +1569,10 @@ fn print_workspace_state(state: &WorkspaceState) {
     println!("updated_at: {}", state.updated_at);
 }
 
-/// Resolve the exact-file override for this invocation. Only `--db` and
-/// `MEM_DB` select exact-file operation; every other invocation uses the
-/// managed layout (whose root `MEM_HOME` selects). Err means "no exact
-/// override requested".
+/// Resolve the database for this invocation. Explicit overrides pin one
+/// file. Otherwise `mem` uses `<project>/.mem/mem.db`. An existing
+/// `.mem/` inside the current project wins; otherwise a Git root is the
+/// project boundary, and non-Git use falls back to the current directory.
 fn database_path(override_path: Option<&Path>) -> Result<PathBuf> {
     if let Some(path) = override_path {
         return Ok(path.to_owned());
@@ -1569,7 +1580,55 @@ fn database_path(override_path: Option<&Path>) -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("MEM_DB").filter(|path| !path.is_empty()) {
         return Ok(PathBuf::from(path));
     }
-    bail!("no exact database override requested")
+
+    let cwd = std::env::current_dir().context("determine current directory")?;
+    let project = ProjectContext::detect(None, None)?;
+    if let Some(root) = project.as_ref().and_then(|context| context.root.as_ref()) {
+        for ancestor in cwd.ancestors() {
+            let mem_dir = ancestor.join(".mem");
+            if mem_dir.is_dir() {
+                return Ok(mem_dir.join("mem.db"));
+            }
+            if ancestor == root {
+                break;
+            }
+        }
+        return Ok(root.join(".mem").join("mem.db"));
+    }
+    for ancestor in cwd.ancestors() {
+        let mem_dir = ancestor.join(".mem");
+        if mem_dir.is_dir() {
+            return Ok(mem_dir.join("mem.db"));
+        }
+    }
+    Ok(cwd.join(".mem").join("mem.db"))
+}
+
+fn command_writes(command: &Command) -> bool {
+    match command {
+        Command::Init(_) | Command::Remember(_) | Command::Correct(_) | Command::Forget(_) => true,
+        Command::State(state) => !matches!(&state.command, StateCommand::Show(_)),
+        Command::Episode(episode) => !matches!(&episode.command, EpisodeSubcommand::Get(_)),
+        Command::Index(index) => !matches!(&index.command, IndexSubcommand::Status(_)),
+        _ => false,
+    }
+}
+
+fn ensure_local_ignore(db_path: &Path) -> Result<()> {
+    let directory = db_path
+        .parent()
+        .context("local memory database has no parent directory")?;
+    std::fs::create_dir_all(directory)
+        .with_context(|| format!("create local memory directory {}", directory.display()))?;
+    let ignore = directory.join(".gitignore");
+    if !ignore.exists() {
+        std::fs::write(
+            &ignore, "*
+",
+        )
+        .with_context(|| format!("write {}", ignore.display()))?;
+    }
+    Ok(())
 }
 
 fn print_json(value: &impl Serialize) -> Result<()> {

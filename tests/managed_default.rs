@@ -1,223 +1,155 @@
-//! Managed-layout default activation (storage slice E) integration tests.
-//!
-//! Each test spawns the real `mem` binary with an isolated `MEM_HOME`, so
-//! these exercise the exact router construction the shipped CLI performs.
+//! Integration coverage for repo-local default storage.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
+use uuid::Uuid;
 
-fn run(home: &Path, args: &[&str]) -> std::process::Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_mem"));
-    command.env("MEM_HOME", home).env_remove("MEM_DB");
-    command.args(args).output().expect("spawn mem")
-}
-
-fn test_home(name: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(format!("mem-slice-e-{name}-{}", uuid::Uuid::now_v7()));
-    std::fs::create_dir_all(&path).expect("create test home");
+fn temp_dir() -> PathBuf {
+    let path = std::env::temp_dir().join(format!("mem-repo-local-{}", Uuid::now_v7()));
+    std::fs::create_dir_all(&path).expect("create temp dir");
     path
 }
 
-fn stdout(output: &std::process::Output) -> String {
-    String::from_utf8(output.stdout.clone()).expect("utf-8 stdout")
+fn command(cwd: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_mem"));
+    command
+        .current_dir(cwd)
+        .env_remove("MEM_DB")
+        .env_remove("MEM_HOME");
+    command
 }
 
-fn stderr(output: &std::process::Output) -> String {
-    String::from_utf8(output.stderr.clone()).expect("utf-8 stderr")
+fn run(cwd: &Path, args: &[&str]) -> Output {
+    command(cwd).args(args).output().expect("spawn mem")
 }
 
-fn json_field(output: &str, field: &str) -> String {
-    let value: serde_json::Value = serde_json::from_str(output).expect("valid json");
-    value[field].as_str().unwrap_or_default().to_owned()
-}
-
-fn context_texts(output: &std::process::Output) -> Vec<String> {
-    let value: serde_json::Value = serde_json::from_str(&stdout(output)).expect("json");
-    value["memories"]
-        .as_array()
-        .expect("memories array")
-        .iter()
-        .map(|memory| {
-            memory["memory"]["text"]
-                .as_str()
-                .expect("memory text")
-                .to_owned()
-        })
-        .collect()
+fn run_json(cwd: &Path, args: &[&str]) -> serde_json::Value {
+    let output = command(cwd)
+        .arg("--json")
+        .args(args)
+        .output()
+        .expect("spawn mem");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("parse JSON")
 }
 
 #[test]
-fn managed_layout_is_the_default_without_overrides() {
-    let home = test_home("default");
-    let output = run(&home, &["--json", "remember", "default layout fact"]);
-    assert!(output.status.success(), "{}", stderr(&output));
-
-    let output = run(&home, &["--json", "status"]);
-    assert!(output.status.success());
-    let database = json_field(&stdout(&output), "database");
-    assert!(
-        database.ends_with("layout-v1/user.db"),
-        "expected the managed user store, got {database}"
+fn init_creates_repo_local_store_and_ignore_file() {
+    let cwd = temp_dir();
+    let value = run_json(&cwd, &["init"]);
+    let db = cwd.join(".mem/mem.db");
+    assert!(db.is_file());
+    assert_eq!(value["database"], db.display().to_string());
+    assert_eq!(
+        std::fs::read_to_string(cwd.join(".mem/.gitignore")).unwrap(),
+        "*\n"
     );
-
-    let output = run(&home, &["--json", "context", "default layout fact"]);
-    assert!(output.status.success());
-    assert!(
-        context_texts(&output).contains(&"default layout fact".to_owned()),
-        "global memory must be recallable through the managed default"
-    );
-
-    std::fs::remove_dir_all(&home).expect("cleanup");
+    std::fs::remove_dir_all(cwd).unwrap();
 }
 
 #[test]
-fn db_override_keeps_exact_file_operation() {
-    let home = test_home("exact");
-    let db = home.join("exact.db");
-    let output = run(
-        &home,
+fn absent_store_reads_do_not_initialize_storage() {
+    let cwd = temp_dir();
+    let status = run_json(&cwd, &["status"]);
+    assert_eq!(status["schema_version"], 0);
+    assert_eq!(status["total"], 0);
+    assert_eq!(
+        run_json(&cwd, &["search", "nothing", "--global"])
+            .as_array()
+            .map(Vec::len),
+        Some(0)
+    );
+    assert_eq!(
+        run_json(&cwd, &["context", "nothing"])["memories"]
+            .as_array()
+            .map(Vec::len),
+        Some(0)
+    );
+    assert!(!cwd.join(".mem").exists());
+    std::fs::remove_dir_all(cwd).unwrap();
+}
+
+#[test]
+fn write_initializes_repo_local_storage_without_init() {
+    let cwd = temp_dir();
+    let value = run_json(
+        &cwd,
         &[
-            "--json",
+            "remember",
+            "repo-local memory",
+            "--global",
+            "--source-type",
+            "test",
+        ],
+    );
+    assert_eq!(value["text"], "repo-local memory");
+    assert!(cwd.join(".mem/mem.db").is_file());
+    assert!(cwd.join(".mem/.gitignore").is_file());
+    std::fs::remove_dir_all(cwd).unwrap();
+}
+
+#[test]
+fn explicit_database_bypasses_repo_local_storage() {
+    let cwd = temp_dir();
+    let db = cwd.join("exact.db");
+    let output = command(&cwd)
+        .args([
             "--db",
             db.to_str().unwrap(),
             "remember",
-            "exact fact",
-        ],
+            "exact memory",
+            "--global",
+            "--source-type",
+            "test",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    assert!(output.status.success(), "{}", stderr(&output));
-
-    let output = run(&home, &["--json", "--db", db.to_str().unwrap(), "status"]);
-    assert!(output.status.success());
-    let database = json_field(&stdout(&output), "database");
-    assert!(database.ends_with("exact.db"), "got {database}");
-    // Exact operation must not create the managed layout.
-    assert!(!home.join("layout-v1").is_dir());
-
-    std::fs::remove_dir_all(&home).expect("cleanup");
+    assert!(db.is_file());
+    assert!(!cwd.join(".mem").exists());
+    std::fs::remove_dir_all(cwd).unwrap();
 }
 
 #[test]
-fn legacy_store_surfaces_migration_guidance() {
-    let home = test_home("legacy");
-    std::fs::write(home.join("memory.db"), b"legacy marker").expect("write legacy");
-
-    // Storage-touching commands refuse with migration guidance.
-    let output = run(&home, &["--json", "remember", "should not work"]);
-    assert!(
-        !output.status.success(),
-        "must refuse while migration is pending"
+fn nested_commands_reuse_nearest_existing_mem_directory() {
+    let root = temp_dir();
+    let nested = root.join("a/b/c");
+    std::fs::create_dir_all(&nested).unwrap();
+    assert!(run(&root, &["init"]).status.success());
+    let value = run_json(&nested, &["status"]);
+    assert_eq!(
+        value["database"],
+        root.join(".mem/mem.db").display().to_string()
     );
-    let error = stderr(&output);
-    assert!(
-        error.contains("mem storage migrate"),
-        "expected migration guidance, got: {error}"
-    );
-
-    // Inventory stays usable.
-    let output = run(&home, &["--json", "storage", "status"]);
-    assert!(output.status.success(), "{}", stderr(&output));
-
-    std::fs::remove_dir_all(&home).expect("cleanup");
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
-fn migrated_layout_becomes_the_default_surface() {
-    let home = test_home("migrated");
-    let legacy = home.join("memory.db");
-    let output = run(
-        &home,
-        &[
-            "--json",
-            "--db",
-            legacy.to_str().unwrap(),
-            "remember",
-            "migrated legacy fact",
-        ],
+fn git_repo_root_is_default_project_boundary() {
+    let root = temp_dir();
+    let git = Command::new("git")
+        .args(["init", "-q", root.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(git.status.success());
+    let nested = root.join("src/deep");
+    std::fs::create_dir_all(&nested).unwrap();
+    let value = run_json(&nested, &["status"]);
+    assert_eq!(
+        value["database"],
+        root.join(".mem/mem.db").display().to_string()
     );
-    assert!(output.status.success(), "{}", stderr(&output));
-
-    let output = run(&home, &["--json", "storage", "migrate"]);
-    assert!(output.status.success(), "{}", stderr(&output));
-
-    let output = run(&home, &["--json", "context", "migrated legacy fact"]);
-    assert!(output.status.success());
     assert!(
-        context_texts(&output).contains(&"migrated legacy fact".to_owned()),
-        "migrated rows must be visible through the managed default"
+        !root.join(".mem").exists(),
+        "read must not initialize the repo store"
     );
-
-    std::fs::remove_dir_all(&home).expect("cleanup");
-}
-
-#[test]
-fn recall_respects_byte_budget() {
-    let home = test_home("budget");
-    // Global memories; from /tmp (no project) context reads them all.
-    for text in [
-        "budget fact one with a reasonably sized body",
-        "budget fact two with a reasonably sized body",
-        "budget fact three with a reasonably sized body",
-    ] {
-        let output = run(&home, &["--json", "remember", text]);
-        assert!(output.status.success(), "{}", stderr(&output));
-    }
-
-    // A tight budget must cut recall below the item limit.
-    let output = run(
-        &home,
-        &["--json", "context", "budget fact", "--max-bytes", "64"],
-    );
-    assert!(output.status.success(), "{}", stderr(&output));
-    let texts = context_texts(&output);
-    assert!(
-        !texts.is_empty(),
-        "the first hit must be included even when the budget is tight"
-    );
-    let total: usize = texts.iter().map(|text| text.len()).sum();
-    // First hit always included; anything after must fit the budget.
-    assert!(
-        total <= 64 + texts[0].len(),
-        "total {total} far exceeds the 64-byte budget"
-    );
-
-    // A generous budget returns everything up to the item limit.
-    let output = run(
-        &home,
-        &["--json", "context", "budget fact", "--max-bytes", "100000"],
-    );
-    assert_eq!(context_texts(&output).len(), 3);
-
-    // Zero disables the budget.
-    let output = run(
-        &home,
-        &["--json", "context", "budget fact", "--max-bytes", "0"],
-    );
-    assert_eq!(context_texts(&output).len(), 3);
-
-    std::fs::remove_dir_all(&home).expect("cleanup");
-}
-
-#[cfg(unix)]
-#[test]
-fn created_stores_are_private_to_the_user() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let home = test_home("permissions");
-    let output = run(&home, &["--json", "remember", "private memory", "--global"]);
-    assert!(output.status.success(), "{}", stderr(&output));
-
-    let layout = home.join("layout-v1");
-    let mode = std::fs::metadata(&layout)
-        .expect("layout metadata")
-        .permissions()
-        .mode();
-    assert_eq!(mode & 0o777, 0o700, "layout directory must be user-private");
-    let user_db = layout.join("user.db");
-    let mode = std::fs::metadata(&user_db)
-        .expect("database metadata")
-        .permissions()
-        .mode();
-    assert_eq!(mode & 0o777, 0o600, "database files must be user-private");
-
-    std::fs::remove_dir_all(&home).expect("cleanup");
+    std::fs::remove_dir_all(root).unwrap();
 }
