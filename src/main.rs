@@ -220,7 +220,7 @@ struct Remember {
     /// Memory text.
     text: String,
 
-    /// Memory kind: fact, decision, constraint, preference, or procedure.
+    /// Memory kind: fact, finding, decision, constraint, preference, or procedure.
     #[usage(long)]
     kind: Option<String>,
 
@@ -854,7 +854,7 @@ fn run(cli: MemCli) -> Result<()> {
                 text: command.text,
                 kind: command.kind.unwrap_or_else(|| "fact".to_owned()),
                 project_id,
-                actor: command.actor.unwrap_or_else(|| "user".to_owned()),
+                actor: command.actor.unwrap_or_else(|| "agent".to_owned()),
                 source_type: command.source_type.unwrap_or_else(|| "cli".to_owned()),
                 source_ref: command.source_ref,
             })?;
@@ -872,7 +872,7 @@ fn run(cli: MemCli) -> Result<()> {
                 NewCorrection {
                     text: command.text,
                     kind: command.kind,
-                    actor: command.actor.unwrap_or_else(|| "user".to_owned()),
+                    actor: command.actor.unwrap_or_else(|| "agent".to_owned()),
                     source_type: command.source_type.unwrap_or_else(|| "cli".to_owned()),
                     source_ref: command.source_ref,
                 },

@@ -8,7 +8,14 @@ use serde::Serialize;
 use uuid::Uuid;
 
 const SCHEMA_VERSION: i64 = 5;
-const MEMORY_KINDS: &[&str] = &["fact", "decision", "constraint", "preference", "procedure"];
+const MEMORY_KINDS: &[&str] = &[
+    "fact",
+    "finding",
+    "decision",
+    "constraint",
+    "preference",
+    "procedure",
+];
 
 #[derive(Debug)]
 pub struct Store {
