@@ -76,6 +76,80 @@ jobs:
           PY
 
           python3 /tmp/scope.py
+
+          # Mechanical cleanup after the structural transform. Keep this
+          # explicit so compile failures still expose any unanticipated API
+          # drift rather than hiding it behind broad regexes.
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path('src/vector_search.rs')
+          text = path.read_text().replace('use rusqlite::{Row, params};', 'use rusqlite::Row;')
+          path.write_text(text)
+
+          path = Path('src/store.rs')
+          text = path.read_text()
+          replacements = {
+              '.search("publication preference", Some(project), 10)': '.search("publication preference", 10)',
+              '.recall("publication preference", Some(project), 10)': '.recall("publication preference", 10)',
+              '.search("active", Some(project), 10)': '.search("active", 10)',
+              '.search("beta", Some(project), 10)': '.search("beta", 10)',
+          }
+          for old, new in replacements.items():
+              text = text.replace(old, new)
+          text = text.replace(
+              '/// mutable payload; project and workspace identify the state row.',
+              '/// mutable payload; workspace identifies the state row.',
+          )
+          path.write_text(text)
+
+          path = Path('src/main.rs')
+          text = path.read_text()
+          old = '''    let project = ProjectContext::detect(None)?;
+          if let Some(root) = project.as_ref().and_then(|context| context.root.as_ref()) {'''.replace('\n          ', '\n')
+          new = '''    let project = ProjectContext::detect(None)?;
+          if let Some(root) = project.root.as_ref() {'''.replace('\n          ', '\n')
+          assert old in text, 'database path still expects optional project context'
+          text = text.replace(old, new, 1)
+          path.write_text(text)
+
+          for filename in ['tests/retrieval_eval.rs', 'tests/real_corpus_eval.rs', 'tests/heldout_eval.rs']:
+              path = Path(filename)
+              text = path.read_text().replace('Some(PROJECT)', 'None')
+              path.write_text(text)
+
+          # The retrieval-eval transform can delete the tiny wrapper while
+          # removing old scope plumbing; restore it without changing the
+          # environment-aware helper used by coverage tests.
+          path = Path('tests/retrieval_eval.rs')
+          text = path.read_text()
+          if 'fn context_ids(db: &Path, query: &str, lexical: bool)' not in text:
+              marker = 'fn context_ids_env(db: &Path, query: &str, lexical: bool, env: &[(&str, &str)]) -> Vec<String> {'
+              assert marker in text, 'context_ids_env helper missing'
+              wrapper = '''fn context_ids(db: &Path, query: &str, lexical: bool) -> Vec<String> {
+              context_ids_env(db, query, lexical, &[])
+          }
+
+          '''.replace('\n          ', '\n')
+              text = text.replace(marker, wrapper + marker, 1)
+          path.write_text(text)
+
+          # Project routing no longer exists, so the poisoning eval keeps the
+          # rank/status containment probes and drops only the obsolete
+          # cross-project sub-probe.
+          path = Path('tests/heldout_eval.rs')
+          text = path.read_text()
+          start_marker = '    // The poisoned memory itself is retrievable (storage is neutral), but\n'
+          end_marker = '    // A superseded poison memory must vanish from recall entirely.\n'
+          if start_marker in text:
+              start = text.index(start_marker)
+              end = text.index(end_marker, start)
+              text = text[:start] + text[end:]
+          text = re.sub(r'\nfn other_project_visible\(.*?\n\}\n', '\n', text, count=1, flags=re.S)
+          path.write_text(text)
+          PY
+
           cargo fmt --all
           cargo test --all-targets
           cargo clippy --all-targets -- -D warnings
