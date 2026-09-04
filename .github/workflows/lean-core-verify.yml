@@ -2,12 +2,12 @@ name: lean-core-verify
 
 on:
   push:
-    branches: [agent/lean-core]
+    branches: ['agent/lean-core']
     paths:
       - .github/workflows/lean-core-verify.yml
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   verify:
@@ -21,16 +21,14 @@ jobs:
           toolchain: 1.98.0
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Refresh contracts and migration fixture
+      - name: Prepare current-contract test tree
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-          import re
           import sqlite3
 
-          # Build a real v6 fixture before removing the obsolete migration chain.
           db = Path('/tmp/mem-v6.db')
           connection = sqlite3.connect(db)
           for number in range(1, 7):
@@ -51,338 +49,31 @@ jobs:
           connection.commit()
           connection.close()
 
-          def context_memory_shape(path: Path):
+          for filename in ['tests/retrieval_eval.rs', 'tests/real_corpus_eval.rs', 'tests/heldout_eval.rs']:
+              path = Path(filename)
               text = path.read_text()
+              text = text.replace('&["index", "run",', '&["index",')
+              text = text.replace('index["committed"]', 'index["indexed"]')
+              text = text.replace('corrected["replacement"]["memory"]["id"]', 'corrected["replacement"]["id"]')
               start = text.index('fn context_ids')
               end = text.index('fn lexical_ids', start)
               segment = text[start:end].replace('item["memory"]["id"]', 'item["id"]')
-              path.write_text(text[:start] + segment + text[end:])
+              text = text[:start] + segment + text[end:]
+              path.write_text(text)
 
-          # Retrieval eval: preserve the useful ranking experiment, update the product corpus.
-          path = Path('tests/retrieval_eval.rs')
-          text = path.read_text()
-          text = text.replace('&["index", "run",', '&["index",')
-          text = text.replace('index["committed"]', 'index["indexed"]')
-          text = text.replace('corrected["replacement"]["memory"]["id"]', 'corrected["replacement"]["id"]')
-          text = text.replace('lexical-or (context --lexical)', 'lexical-or')
-          corpus = r'''fn corpus() -> Vec<Seed<'static>> {
-              vec![
-                  Seed { key: "workspace", text: "Continuation state is keyed by workspace inside the repo-local database so separate branches and worktrees keep independent resume points.", kind: "decision" },
-                  Seed { key: "stale", text: "An embedding is committed only when the memory is still active at the exact updated_at value that was embedded; stale source versions are discarded.", kind: "constraint" },
-                  Seed { key: "hosting", text: "The memory core is local and agent-neutral; hosted project systems and sync belong outside the storage and retrieval core.", kind: "decision" },
-                  Seed { key: "storage", text: "SQLite is the canonical project store, with synchronous FTS5 and rebuildable local embeddings.", kind: "decision" },
-                  Seed { key: "ann", text: "Use exact cosine scanning for the small local corpus and add ANN only if profiling shows a real need.", kind: "decision" },
-                  Seed { key: "corrections", text: "Corrections preserve the predecessor as superseded and point it directly at the replacement instead of overwriting history.", kind: "procedure" },
-                  Seed { key: "provenance", text: "Each memory stores the actor, source type, and optional source reference directly so recalled knowledge retains lightweight provenance.", kind: "decision" },
-                  Seed { key: "indexing", text: "Indexing scans active memories missing a current-model vector; failures leave no durable queue state and a later index run simply retries the missing work.", kind: "procedure" },
-                  Seed { key: "tasks", text: "Task tracking stays outside mem; a continuation checkpoint may reference an external task without depending on a task system.", kind: "constraint" },
-                  Seed { key: "oneshot", text: "Keep mem as a one-shot CLI unless measured latency demonstrates a persistent service is necessary.", kind: "decision" },
-                  Seed { key: "authority", text: "Provenance is descriptive audit context, not authenticated authority and not a retrieval-ranking weight.", kind: "constraint" },
-                  Seed { key: "compactness", text: "Prefer concise durable memory over ambient transcript dumps or duplicated documents.", kind: "preference" },
-              ]
-          }
-
-          fn cases() -> Vec<Case<'static>> {
-              vec![
-                  Case { key: "workspace", query: "How do two repository checkouts avoid clobbering the same resume point?" },
-                  Case { key: "stale", query: "What prevents a vector computed from old text from replacing newer state?" },
-                  Case { key: "hosting", query: "Should cloud project sync be built into the memory database core?" },
-                  Case { key: "storage", query: "What database is the canonical source of project memory?" },
-                  Case { key: "ann", query: "Do we need a nearest-neighbor index for the current local corpus?" },
-                  Case { key: "corrections", query: "When a decision is corrected, do we destroy the old record?" },
-                  Case { key: "provenance", query: "Where does a recalled fact say it originally came from?" },
-                  Case { key: "indexing", query: "What happens after embedding inference fails halfway through indexing?" },
-                  Case { key: "tasks", query: "Does mem own the project backlog and task lifecycle?" },
-                  Case { key: "oneshot", query: "Why isn't there a resident memory daemon?" },
-                  Case { key: "authority", query: "Can caller supplied source labels make a memory more trusted?" },
-                  Case { key: "compactness", query: "Should whole transcripts be retained as durable context just in case?" },
-              ]
-          }
-
-          '''
-          text = re.sub(r"fn corpus\(\) -> Vec<Seed<'static>> \{.*?\nfn remember\(db: &Path, seed: &Seed<'_>\) -> Value \{", corpus + "fn remember(db: &Path, seed: &Seed<'_>) -> Value {", text, flags=re.S)
-          path.write_text(text)
-          context_memory_shape(path)
-
-          # Real-corpus eval: make it describe the current product rather than deleted history.
-          path = Path('tests/real_corpus_eval.rs')
-          text = path.read_text()
-          text = text.replace('&["index", "run",', '&["index",')
-          text = text.replace('index["committed"]', 'index["indexed"]')
-          text = text.replace('lexical-or (context --lexical)', 'lexical-or')
-          corpus = r'''fn corpus() -> Vec<Seed<'static>> {
-              vec![
-                  Seed { key: "package-naming", text: "The crates.io package is mem-cli while the installed executable and repository are named mem.", kind: "fact" },
-                  Seed { key: "toolchain", text: "Rust 1.98.0 is pinned and CI gates changes with rustfmt, all-target tests, strict Clippy, and a release build.", kind: "constraint" },
-                  Seed { key: "repo-local", text: "Normal storage is one repo-local .mem/mem.db, giving projects physical isolation without logical project routing or cross-project recall.", kind: "decision" },
-                  Seed { key: "provenance", text: "A memory carries one actor, source type, and optional source reference directly; richer provenance structures wait for a demonstrated workflow.", kind: "decision" },
-                  Seed { key: "fts-baseline", text: "FTS5 lexical search is synchronous and always available; semantic embeddings are derived and never required for canonical correctness.", kind: "decision" },
-                  Seed { key: "source-version", text: "Embedding writes are guarded by the memory updated_at they were computed from, so stale work cannot commit after the source changes.", kind: "constraint" },
-                  Seed { key: "direct-index", text: "mem index selects active memories missing a current-model vector directly; there is no durable worker queue, lease protocol, or retry ledger.", kind: "decision" },
-                  Seed { key: "explicit-promotion", text: "Durable memories are promoted intentionally rather than copying every conversation turn or raw chain-of-thought into the database.", kind: "constraint" },
-                  Seed { key: "no-storage-abstraction", text: "Keep SQLite-specific code direct until a real second storage backend exists instead of designing a generic backend trait speculatively.", kind: "constraint" },
-                  Seed { key: "correct-supersession", text: "Correcting a memory creates a replacement and marks the predecessor superseded with a direct superseded_by pointer in one immediate transaction.", kind: "procedure" },
-                  Seed { key: "workspace", text: "Continuation state is a compact workspace cursor inside the local project database, separate from durable semantic memories.", kind: "decision" },
-                  Seed { key: "compactness", text: "Context recall is count- and byte-bounded so agents receive a small set of relevant durable memories rather than ambient dumps.", kind: "preference" },
-                  Seed { key: "oneshot", text: "The CLI remains one-shot and runtime-agnostic; a daemon is only justified by measured latency that cannot be solved more simply.", kind: "decision" },
-                  Seed { key: "db-override", text: "--db and MEM_DB are exact-database escape hatches for tests and isolated profiles, not alternate normal storage architectures.", kind: "fact" },
-                  Seed { key: "distractor", text: "The unrelated sync utility writes destination files through atomic temporary-file renames so interrupted copies never expose partial output.", kind: "constraint" },
-              ]
-          }
-
-          fn cases() -> Vec<Case<'static>> {
-              vec![
-                  Case { key: "package-naming", query: "Why is cargo installing a package whose registry name differs from the command?" },
-                  Case { key: "toolchain", query: "Which Rust version and checks qualify changes here?" },
-                  Case { key: "repo-local", query: "Where is project memory physically stored and isolated?" },
-                  Case { key: "provenance", query: "How much source metadata is attached to one remembered conclusion?" },
-                  Case { key: "fts-baseline", query: "What still works if no embedding model is available?" },
-                  Case { key: "source-version", query: "How does stale semantic work avoid overwriting vectors for newer text?" },
-                  Case { key: "direct-index", query: "Is there a persistent background work queue for embeddings?" },
-                  Case { key: "explicit-promotion", query: "Does every chat message automatically become a durable memory?" },
-                  Case { key: "no-storage-abstraction", query: "Should we add a database backend trait before another backend exists?" },
-                  Case { key: "correct-supersession", query: "What exactly happens when an existing memory is corrected?" },
-                  Case { key: "workspace", query: "What is continuation state used for relative to durable knowledge?" },
-                  Case { key: "compactness", query: "Why doesn't context return every matching record it can find?" },
-                  Case { key: "oneshot", query: "Why isn't a service process kept warm between commands?" },
-                  Case { key: "db-override", query: "How do tests pin mem to one exact SQLite file?" },
-              ]
-          }
-
-          '''
-          text = re.sub(r"fn corpus\(\) -> Vec<Seed<'static>> \{.*?\nfn remember\(db: &Path, seed: &Seed<'_>\) -> Value \{", corpus + "fn remember(db: &Path, seed: &Seed<'_>) -> Value {", text, flags=re.S)
-          path.write_text(text)
-          context_memory_shape(path)
-
-          # Held-out eval only needs API-shape and one obsolete worker case updated.
           path = Path('tests/heldout_eval.rs')
           text = path.read_text()
-          text = text.replace('&["index", "run",', '&["index",')
           text = text.replace('key: "queue-fencing"', 'key: "source-version"')
           text = text.replace(
               'Stale embedding workers cannot corrupt newer work: each commit carries a generation and lease token, and a mismatched commit is rejected without consuming the job.',
-              'Embedding commits carry the source updated_at they were computed from; stale vectors are discarded when the memory changed before commit.'
+              'Embedding commits carry the source updated_at they were computed from; stale vectors are discarded when the memory changes before commit.'
           )
           text = text.replace(
               'stop an old background job from stomping fresh reindex work',
               'stop a vector computed from old text from overwriting newer memory state'
           )
-          text = text.replace('key: "global-provenance"', 'key: "provenance"')
-          text = text.replace('must remain scope-delimited (project) and status-delimited', 'must remain status-delimited')
-          path.write_text(text)
-          context_memory_shape(path)
-
-          # Retrieval workflow paths should follow the actual core.
-          path = Path('.github/workflows/retrieval-eval.yml')
-          text = path.read_text().replace('      - src/storage.rs\n', '      - src/workspace.rs\n      - migrations/schema.sql\n      - migrations/0007_lean_core.sql\n')
           path.write_text(text)
           PY
-
-          cat > .github/workflows/embedding-smoke.yml <<'EOF'
-          name: embedding-smoke
-
-          on:
-            workflow_dispatch:
-            push:
-              branches: [main]
-              paths:
-                - .github/workflows/embedding-smoke.yml
-                - Cargo.toml
-                - migrations/schema.sql
-                - migrations/0007_lean_core.sql
-                - src/embedding.rs
-                - src/embedding_worker.rs
-                - src/main.rs
-                - src/store.rs
-                - src/vector_search.rs
-
-          permissions:
-            contents: read
-
-          jobs:
-            embed:
-              strategy:
-                fail-fast: false
-                matrix:
-                  os: [ubuntu-22.04, macos-15]
-              runs-on: ${{ matrix.os }}
-              env:
-                MEM_MODEL_CACHE: ${{ github.workspace }}/.model-cache
-              steps:
-                - uses: actions/checkout@v4
-                - uses: dtolnay/rust-toolchain@master
-                  with:
-                    toolchain: 1.98.0
-                - uses: Swatinem/rust-cache@v2
-                - name: Cache embedding model
-                  uses: actions/cache@v4
-                  with:
-                    path: .model-cache
-                    key: fastembed-5.3.0-bge-small-en-v1.5-q-${{ runner.os }}-${{ runner.arch }}
-                - name: Build
-                  run: cargo build --release
-                - name: Run semantic retrieval smoke
-                  shell: bash
-                  run: |
-                    set -euo pipefail
-                    db="$RUNNER_TEMP/mem-smoke.db"
-                    target="Each Git worktree keeps an independent continuation checkpoint."
-                    query="separate resume state for parallel repository checkouts"
-
-                    target/release/mem --db "$db" remember "$target" --kind decision --source-type smoke
-                    target/release/mem --db "$db" remember "Deleted memories are excluded from active search results." --source-type smoke
-                    target/release/mem --db "$db" remember "Semantic memories retain provenance for their source." --source-type smoke
-                    target/release/mem --db "$db" remember "Indexing retries naturally when a current vector is still missing." --source-type smoke
-
-                    index_json="$(target/release/mem --json --db "$db" index -n 4)"
-                    INDEX_JSON="$index_json" python3 - <<'PY'
-                    import json, os
-                    result = json.loads(os.environ['INDEX_JSON'])
-                    assert result['indexed'] == 4, result
-                    assert result['remaining'] == 0, result
-                    assert result['stale'] == 0, result
-                    PY
-
-                    status_json="$(target/release/mem --json --db "$db" status)"
-                    STATUS_JSON="$status_json" python3 - <<'PY'
-                    import json, os
-                    status = json.loads(os.environ['STATUS_JSON'])
-                    assert status['indexed'] == 4, status
-                    assert status['unindexed'] == 0, status
-                    PY
-
-                    semantic_json="$(target/release/mem --json --db "$db" search "$query" --semantic -n 4)"
-                    SEMANTIC_JSON="$semantic_json" TARGET="$target" python3 - <<'PY'
-                    import json, os
-                    hits = json.loads(os.environ['SEMANTIC_JSON'])
-                    assert hits[0]['memory']['text'] == os.environ['TARGET'], hits
-                    PY
-          EOF
-
-          cat > README.md <<'EOF'
-          # mem
-
-          `mem` is a small repo-local memory CLI for coding agents. It preserves durable project knowledge after it falls out of the current context window without turning session transcripts, task tracking, or hosted project state into another memory system.
-
-          ## Core model
-
-          Each project owns one SQLite database at `.mem/mem.db`. Memories are concise durable facts, findings, decisions, constraints, preferences, and procedures. Each memory carries lightweight provenance (`actor`, `source_type`, and optional `source_ref`). Corrections preserve the old record as `superseded` and point it at the replacement.
-
-          Continuation state is separate: one compact resume cursor per workspace (normally the current Git branch or detached commit).
-
-          ## Install
-
-          ```bash
-          cargo install --path .
-          ```
-
-          The crates.io package is `mem-cli`; the executable is `mem`. Rust 1.98 or newer is required.
-
-          ## Commands
-
-          ```bash
-          mem init
-          mem status
-
-          mem remember "Use release/acquire ordering for publication" \
-            --kind decision --source-type git --source-ref abc123
-
-          mem context "publication handoff"
-          mem search "publication ordering"
-          mem search "how do readers observe a published value" --semantic
-
-          mem get <id-or-prefix>
-          mem correct <id-or-prefix> "Use release/acquire ordering on the publication path"
-          mem forget <id-or-prefix>
-
-          mem state show
-          mem state set --goal "qualify publication path" --checkpoint "loom is green"
-          mem state set --session session-123 --clear checkpoint
-          mem state clear
-
-          mem index
-          mem index --cached-only
-          ```
-
-          `remember` and `state set` initialize the repo-local store automatically; `init` is the explicit setup command. `.mem/` is ignored by Git by default. `--db /path/to/file.db` and `MEM_DB` pin an exact database for tests or isolated profiles.
-
-          ## Retrieval
-
-          FTS5 lexical search is synchronous and always available. `mem context` is the agent-facing retrieval path: when every active memory has a current embedding and the model is already cached, it uses semantic ranking; otherwise it falls back to lexical recall so incomplete derived state never hides canonical memories.
-
-          `mem search --semantic` is an explicit semantic-search tool. It requires complete current-model coverage and tells you to run `mem index` when coverage is incomplete. Semantic search uses exact cosine scoring; the expected local corpus is small enough that an ANN index would add complexity without demonstrated value.
-
-          Context is bounded by count and by memory-text bytes (`--max-bytes`, default 32768) to keep recalled context compact. Low-relevance semantic context is allowed to return no memories.
-
-          ## Embeddings
-
-          Embeddings are rebuildable derived data. `mem index` directly selects active memories missing a vector for the current model, embeds a bounded batch, and commits each vector only if the memory is still active at the exact source version that was embedded. There is no background worker protocol or durable retry queue; failed work remains missing and a later `mem index` retries it naturally.
-
-          `mem index --cached-only` never downloads the model, which makes it safe for opportunistic agent hooks.
-
-          ## Storage and safety
-
-          SQLite with bundled FTS5 is canonical. Normal storage is physically isolated per project; there is no automatic cross-project recall. Reads do not create missing stores. Created database files and SQLite sidecars are private to the current user on Unix.
-
-          `mem` is runtime-agnostic and requires no daemon. It does not own task tracking, hosted sync, raw transcript archives, or generic storage backends.
-
-          ## Development
-
-          ```bash
-          cargo fmt --all -- --check
-          cargo test --all-targets
-          cargo clippy --all-targets -- -D warnings
-          cargo build --release
-          ```
-
-          `mem` is pre-1.0 and its interfaces may still change while the core is dogfooded.
-
-          ## License
-
-          MIT
-          EOF
-
-          cat > AGENTS.md <<'EOF'
-          # Agent instructions
-
-          `mem` is a standalone Rust memory CLI for agents. Keep the core independent of any one agent runtime.
-
-          ## Product direction
-
-          `mem` is a small persistent project-memory layer. Preserve high-value project knowledge after it falls out of the model's current context window.
-
-          - Normal storage is repo-local at `.mem/mem.db` (or an explicitly selected `--db` / `MEM_DB` file).
-          - Project isolation is physical: one database per project and no automatic cross-project recall.
-          - Keep one agent-facing retrieval path: `mem context`.
-          - Retrieved context stays small and high-signal; returning no memory is valid when relevance is weak.
-          - Persist promoted durable knowledge, not raw chain-of-thought, exhaustive transcripts, task state, or duplicated documents.
-          - Retain lightweight provenance so recalled knowledge can be traced to its source.
-          - Corrections are non-destructive: current knowledge remains distinguishable from superseded knowledge.
-          - Add sync, daemons, generic backends, richer provenance graphs, or approximate vector indexes only after a concrete workflow or profile demonstrates the need.
-
-          ## Core implementation constraints
-
-          - The crates.io package is `mem-cli`; the executable is `mem`.
-          - Rust 1.98 is pinned.
-          - Bundled SQLite via `rusqlite` is canonical; FTS5 must work without embeddings.
-          - Embeddings are derived and rebuildable. Incomplete derived state must never hide active canonical memories.
-          - Multi-statement writes use IMMEDIATE transactions so concurrent writers serialize before doing work.
-          - Keep retrieval/storage policy in Rust and the CLI runtime-agnostic.
-          - Prefer direct code and deletion over speculative abstractions or compatibility machinery while pre-1.0.
-
-          ## Development
-
-          Before landing code changes:
-
-          ```bash
-          cargo fmt --all -- --check
-          cargo test --all-targets
-          cargo clippy --all-targets -- -D warnings
-          cargo build --release
-          ```
-
-          Retrieval changes should be justified with held-out/project-realistic evals, especially precision, supersession behavior, irrelevant-query abstention, and small context budgets.
-          EOF
 
           rm migrations/0001_initial.sql
           rm migrations/0002_episode_entries.sql
@@ -391,7 +82,7 @@ jobs:
           rm migrations/0005_episode_vectors_disabled.sql
           rm migrations/0006_workspace_local.sql
       - name: Format
-        run: cargo fmt --all
+        run: cargo fmt --all -- --check
       - name: Test
         run: cargo test --all-targets
       - name: Clippy
@@ -403,7 +94,6 @@ jobs:
         run: |
           set -euo pipefail
           status="$(target/release/mem --json --db /tmp/mem-v6.db status)"
-          printf '%s\n' "$status"
           STATUS="$status" python3 - <<'PY'
           import json, os
           status = json.loads(os.environ['STATUS'])
@@ -426,15 +116,3 @@ jobs:
           assert state['goal'] == 'migrate', state
           assert state['checkpoint'] == 'v6 checkpoint', state
           PY
-      - name: Squash verified branch
-        shell: bash
-        run: |
-          set -euo pipefail
-          rm .github/workflows/lean-core-verify.yml
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git reset --soft origin/main
-          git add -A
-          git commit -m "refactor: simplify mem to lean repo-local core"
-          git push --force-with-lease origin HEAD:agent/lean-core
