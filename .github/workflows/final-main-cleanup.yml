@@ -38,62 +38,36 @@ jobs:
 
           store = Path('src/store.rs')
           text = store.read_text()
-          old = '''    pub fn recall(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
-              self.search_fts(&crate::id_resolve::fts_query(query)?, limit)
-          }
-
-          '''
-          if old not in text:
-              raise SystemExit('Store::recall block not found')
-          store.write_text(text.replace(old, '', 1))
+          start = text.index('    pub fn recall(')
+          end = text.index('    pub fn get(', start)
+          store.write_text(text[:start] + text[end:])
 
           main = Path('src/main.rs')
           text = main.read_text()
-          old_budget = '''            for hit in hits {
-              let bytes = hit.memory.text.len();
-              if max_bytes > 0 && !memories.is_empty() && total + bytes > max_bytes {
-                  break;
-              }
-              total += bytes;
-              memories.push(hit.memory);
-          }
-          '''
-          new_budget = '''            for hit in hits {
-              let bytes = hit.memory.text.len();
-              if max_bytes > 0 && total + bytes > max_bytes {
-                  continue;
-              }
-              total += bytes;
-              memories.push(hit.memory);
-          }
-          '''
-          if old_budget not in text:
-              raise SystemExit('context budget block not found')
-          text = text.replace(old_budget, new_budget, 1)
+
+          start = text.index('            for hit in hits {')
+          end = text.index('            let output = ContextOutput', start)
+          block = text[start:end]
+          if '!memories.is_empty() && ' not in block or 'break;' not in block:
+              raise SystemExit('context budget block shape changed')
+          block = block.replace('!memories.is_empty() && ', '', 1).replace('break;', 'continue;', 1)
+          text = text[:start] + block + text[end:]
+
           old_fallback = '    store.recall(query, limit)\n'
           if old_fallback not in text:
               raise SystemExit('recall fallback not found')
           text = text.replace(old_fallback, '    store.search(query, limit)\n', 1)
-          old_db = '''    if let Some(root) = crate::workspace::repo_root() {
-              for ancestor in cwd.ancestors() {
-                  let mem_dir = ancestor.join(".mem");
-                  if mem_dir.is_dir() {
-                      return Ok(mem_dir.join("mem.db"));
-                  }
-                  if ancestor == root {
-                      break;
-                  }
-              }
+
+          function = text.index('fn database_path(')
+          root_start = text.index('    if let Some(root) = crate::workspace::repo_root() {', function)
+          first_loop = text.index('    for ancestor in cwd.ancestors() {', root_start)
+          second_loop = text.index('    for ancestor in cwd.ancestors() {', first_loop + 1)
+          replacement = '''    if let Some(root) = crate::workspace::repo_root() {
               return Ok(root.join(".mem").join("mem.db"));
           }
           '''
-          new_db = '''    if let Some(root) = crate::workspace::repo_root() {
-              return Ok(root.join(".mem").join("mem.db"));
-          }
-          '''
-          if old_db not in text:
-              raise SystemExit('git-root database block not found')
-          main.write_text(text.replace(old_db, new_db, 1))
+          text = text[:root_start] + replacement + text[second_loop:]
+          main.write_text(text)
 
           tests = Path('tests/repo_local.rs')
           text = tests.read_text()
