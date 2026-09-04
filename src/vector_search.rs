@@ -1,7 +1,7 @@
 use std::mem::size_of;
 
 use anyhow::{Result, bail};
-use rusqlite::{Row, params};
+use rusqlite::Row;
 use serde::Serialize;
 
 use crate::store::{Memory, Store};
@@ -19,46 +19,37 @@ struct VectorCandidate {
 }
 
 impl Store {
-    /// Whether every active memory visible in this scope has a stored vector
-    /// for the model (complete coverage). Adapter-facing semantic-first recall
-    /// uses this as a correctness gate: semantic ranking joins from the
-    /// embeddings table, so any visible active memory without a vector would
-    /// silently disappear from recall. Incomplete coverage must fall back to
-    /// lexical retrieval instead.
-    pub fn has_complete_scope_coverage(
-        &self,
-        model: &str,
-        project_id: Option<&str>,
-    ) -> Result<bool> {
+    /// Whether every active memory in this local project store has a current-model vector.
+    pub fn has_complete_coverage(&self, model: &str) -> Result<bool> {
         if model.trim().is_empty() {
             bail!("embedding model identifier cannot be empty");
         }
         let covered: i64 = self.connection.query_row(
             "SELECT COUNT(*)
+
              FROM memories AS m
+
              WHERE m.status = 'active'
-               AND (m.project_id IS NULL OR m.project_id = ?2)
-               AND EXISTS (
-                   SELECT 1 FROM embeddings AS e
-                   WHERE e.entity_type = 'memory'
-                     AND e.entity_id = m.id
-                     AND e.model = ?1
-               )",
-            params![model, project_id],
+
+ AND EXISTS (
+
+     SELECT 1 FROM embeddings AS e
+
+     WHERE e.entity_type = 'memory'
+
+       AND e.entity_id = m.id
+
+       AND e.model = ?1
+
+ )",
+            [model],
             |row| row.get(0),
         )?;
         let visible: i64 = self.connection.query_row(
-            "SELECT COUNT(*)
-             FROM memories AS m
-             WHERE m.status = 'active'
-               AND (m.project_id IS NULL OR m.project_id = ?1)",
-            params![project_id],
+            "SELECT COUNT(*) FROM memories WHERE status = 'active'",
+            [],
             |row| row.get(0),
         )?;
-        // A scope with no active visible memories is vacuously covered;
-        // treating it as incomplete would let one empty store in a routed
-        // scope (an empty user store beside a fully indexed project store)
-        // veto semantic recall for the entire scope.
         Ok(covered == visible)
     }
 
@@ -66,7 +57,6 @@ impl Store {
         &self,
         query_vector: &[f32],
         model: &str,
-        project_id: Option<&str>,
         limit: usize,
     ) -> Result<Vec<SemanticSearchHit>> {
         if model.trim().is_empty() {
@@ -76,39 +66,25 @@ impl Store {
             bail!("semantic search limit must be greater than zero");
         }
         let query = normalize_query(query_vector)?;
+        let mut statement = self.connection.prepare(
+            "SELECT m.id, m.scope, m.project_id, m.kind, m.text, m.actor, m.status,
+\
+      m.created_at, m.updated_at, m.deleted_at, e.dimensions, e.vector
+\
+             FROM embeddings AS e
+\
+             JOIN memories AS m ON m.id = e.entity_id
+\
+             WHERE e.entity_type = 'memory'
+\
+ AND e.model = ?1
+\
+ AND m.status = 'active'",
+        )?;
+        let rows = statement.query_map([model], vector_candidate_from_row)?;
         let mut candidates = Vec::new();
-
-        if let Some(project_id) = project_id {
-            let mut statement = self.connection.prepare(
-                "SELECT m.id, m.scope, m.project_id, m.kind, m.text, m.actor, m.status,\n\
-                        m.created_at, m.updated_at, m.deleted_at, e.dimensions, e.vector\n\
-                 FROM embeddings AS e\n\
-                 JOIN memories AS m ON m.id = e.entity_id\n\
-                 WHERE e.entity_type = 'memory'\n\
-                   AND e.model = ?1\n\
-                   AND m.status = 'active'\n\
-                   AND (m.project_id IS NULL OR m.project_id = ?2)",
-            )?;
-            let rows =
-                statement.query_map(params![model, project_id], vector_candidate_from_row)?;
-            for row in rows {
-                candidates.push(row?);
-            }
-        } else {
-            let mut statement = self.connection.prepare(
-                "SELECT m.id, m.scope, m.project_id, m.kind, m.text, m.actor, m.status,\n\
-                        m.created_at, m.updated_at, m.deleted_at, e.dimensions, e.vector\n\
-                 FROM embeddings AS e\n\
-                 JOIN memories AS m ON m.id = e.entity_id\n\
-                 WHERE e.entity_type = 'memory'\n\
-                   AND e.model = ?1\n\
-                   AND m.status = 'active'\n\
-                   AND m.project_id IS NULL",
-            )?;
-            let rows = statement.query_map([model], vector_candidate_from_row)?;
-            for row in rows {
-                candidates.push(row?);
-            }
+        for row in rows {
+            candidates.push(row?);
         }
 
         let mut hits = Vec::with_capacity(candidates.len());
@@ -133,7 +109,6 @@ impl Store {
                 score,
             });
         }
-
         hits.sort_by(|left, right| {
             right
                 .score
@@ -224,27 +199,23 @@ mod tests {
     use crate::store::NewMemory;
 
     #[test]
-    fn exact_scan_scores_current_model_and_scope() {
+    fn exact_scan_scores_all_active_memories() {
         let path = test_path();
         let mut store = Store::open(&path).expect("open test store");
-        let global = remember(&mut store, "global candidate", None);
-        let alpha = remember(&mut store, "alpha candidate", Some("alpha"));
-        let beta = remember(&mut store, "beta candidate", Some("beta"));
-
-        // The commit path is production-model-only (tested in embedding.rs);
-        // search-layer tests seed vectors directly, including under arbitrary
-        // model IDs, to exercise scoping and scoring independently.
+        let first = remember(&mut store, "first candidate", None);
+        let best = remember(&mut store, "best candidate", Some("legacy-alpha"));
+        let third = remember(&mut store, "third candidate", Some("legacy-beta"));
         let jobs = store
             .claim_index_jobs("worker", 3, Duration::from_secs(30))
             .expect("claim embedding work");
         for job in jobs {
-            let vector = if job.entity_id == alpha.id {
+            let vector = if job.entity_id == best.id {
                 [1.0, 0.0]
-            } else if job.entity_id == global.id {
+            } else if job.entity_id == first.id {
                 [0.8, 0.2]
             } else {
-                assert_eq!(job.entity_id, beta.id);
-                [1.0, 0.0]
+                assert_eq!(job.entity_id, third.id);
+                [0.5, 0.5]
             };
             seed_vector(
                 &store,
@@ -261,61 +232,43 @@ mod tests {
                 )
                 .expect("consume seeded job");
         }
-
-        let alpha_hits = store
-            .semantic_search_by_vector(&[2.0, 0.0], "test-model", Some("alpha"), 10)
-            .expect("search alpha scope");
-        assert_eq!(alpha_hits.len(), 2);
-        assert_eq!(alpha_hits[0].memory.id, alpha.id);
-        assert_eq!(alpha_hits[1].memory.id, global.id);
-        assert!(alpha_hits[0].score > alpha_hits[1].score);
-        assert!(alpha_hits.iter().all(|hit| hit.memory.id != beta.id));
-
-        let global_hits = store
-            .semantic_search_by_vector(&[1.0, 0.0], "test-model", None, 10)
-            .expect("search global scope");
-        assert_eq!(global_hits.len(), 1);
-        assert_eq!(global_hits[0].memory.id, global.id);
-
+        let hits = store
+            .semantic_search_by_vector(&[2.0, 0.0], "test-model", 10)
+            .expect("search local store");
+        assert_eq!(hits.len(), 3);
+        assert_eq!(hits[0].memory.id, best.id);
+        assert!(hits.iter().any(|hit| hit.memory.id == first.id));
+        assert!(hits.iter().any(|hit| hit.memory.id == third.id));
         drop(store);
         cleanup(&path);
     }
 
     #[test]
-    fn coverage_gate_counts_only_active_visible_current_model_vectors() {
+    fn coverage_gate_tracks_all_active_memories() {
         let path = test_path();
         let mut store = Store::open(&path).expect("open test store");
-        let _global = remember(&mut store, "global candidate", None);
-        let _alpha = remember(&mut store, "alpha candidate", Some("alpha"));
-        let _beta = remember(&mut store, "beta candidate", Some("beta"));
-
-        // Empty scope: visible memories exist but none carry vectors ->
-        // no semantic mode.
+        let first = remember(&mut store, "first candidate", None);
+        let second = remember(&mut store, "second candidate", Some("legacy-alpha"));
         assert!(
             !store
-                .has_complete_scope_coverage("prod-model", Some("gamma"))
-                .expect("gate unseen project with no memories")
+                .has_complete_coverage("prod-model")
+                .expect("partial gate")
         );
-        // A scope with zero active visible memories is vacuously covered;
-        // an empty store must never veto semantic recall for a routed scope
-        // (an empty user store beside a fully indexed project store).
+
         let empty_path = test_path();
         let empty = Store::open(&empty_path).expect("open empty store");
         assert!(
             empty
-                .has_complete_scope_coverage("prod-model", None)
-                .expect("gate empty store")
+                .has_complete_coverage("prod-model")
+                .expect("empty gate")
         );
         drop(empty);
         cleanup(&empty_path);
 
-        // Embed each memory through the queue protocol with production-model
-        // vectors.
         let jobs = store
-            .claim_index_jobs("worker", 3, Duration::from_secs(30))
+            .claim_index_jobs("worker", 2, Duration::from_secs(30))
             .expect("claim embedding work");
-        assert_eq!(jobs.len(), 3);
-        for job in &jobs {
+        for job in jobs {
             seed_vector(
                 &store,
                 &job.entity_id,
@@ -331,46 +284,23 @@ mod tests {
                 )
                 .expect("consume seeded job");
         }
-
-        // Full current-model coverage across the visible scope (project +
-        // global memories) unlocks semantic mode; the other project is
-        // invisible to this scope and irrelevant.
         assert!(
             store
-                .has_complete_scope_coverage("prod-model", Some("alpha"))
-                .expect("gate alpha full")
+                .has_complete_coverage("prod-model")
+                .expect("full gate")
         );
-        assert!(
-            store
-                .has_complete_scope_coverage("prod-model", None)
-                .expect("gate global full")
-        );
-
-        // A vector under another model ID does not count toward coverage of
-        // the production model.
         assert!(
             !store
-                .has_complete_scope_coverage("other-model", Some("alpha"))
-                .expect("gate wrong model")
+                .has_complete_coverage("other-model")
+                .expect("wrong-model gate")
         );
 
-        // A newly remembered memory in the same scope breaks coverage until
-        // its embedding job is consumed.
-        let fresh = remember(&mut store, "fresh alpha fact", Some("alpha"));
-        let _ = fresh;
+        let fresh = remember(&mut store, "fresh fact", Some("legacy-other"));
         assert!(
             !store
-                .has_complete_scope_coverage("prod-model", Some("alpha"))
-                .expect("gate partial")
+                .has_complete_coverage("prod-model")
+                .expect("fresh gate")
         );
-        // The global-only scope is unaffected by the alpha-scoped addition.
-        assert!(
-            store
-                .has_complete_scope_coverage("prod-model", None)
-                .expect("gate global still full")
-        );
-
-        // Consuming the fresh job restores complete coverage.
         let job = store
             .claim_index_jobs("worker", 1, Duration::from_secs(30))
             .expect("claim fresh work")
@@ -393,23 +323,22 @@ mod tests {
             .expect("consume fresh job");
         assert!(
             store
-                .has_complete_scope_coverage("prod-model", Some("alpha"))
-                .expect("gate full again")
+                .has_complete_coverage("prod-model")
+                .expect("restored gate")
         );
 
-        // Superseding a memory removes it from the visible active set; the
-        // still-covered remainder keeps semantic mode unlocked.
         store.forget(&fresh.id).expect("delete fresh memory");
         assert!(
             store
-                .has_complete_scope_coverage("prod-model", Some("alpha"))
-                .expect("gate ignores inactive rows")
+                .has_complete_coverage("prod-model")
+                .expect("inactive ignored")
         );
-        let alpha_hits = store
-            .semantic_search_by_vector(&[1.0, 0.0], "prod-model", Some("alpha"), 10)
+        let hits = store
+            .semantic_search_by_vector(&[1.0, 0.0], "prod-model", 10)
             .expect("search still works");
-        assert!(alpha_hits.iter().all(|hit| hit.memory.id != fresh.id));
-
+        assert!(hits.iter().all(|hit| hit.memory.id != fresh.id));
+        assert!(hits.iter().any(|hit| hit.memory.id == first.id));
+        assert!(hits.iter().any(|hit| hit.memory.id == second.id));
         drop(store);
         cleanup(&path);
     }
@@ -423,19 +352,13 @@ mod tests {
             .connection
             .execute(
                 "INSERT INTO embeddings (
-                     entity_type, entity_id, model, dimensions, vector, source_generation, updated_at
-                 ) VALUES ('memory', ?1, ?2, ?3, ?4, ?5, 0)
-                 ON CONFLICT(entity_type, entity_id, model) DO UPDATE SET
-                     dimensions = excluded.dimensions,
-                     vector = excluded.vector,
-                     source_generation = excluded.source_generation",
-                rusqlite::params![
-                    entity_id,
-                    model,
-                    vector.len() as i64,
-                    encoded,
-                    generation
-                ],
+       entity_type, entity_id, model, dimensions, vector, source_generation, updated_at
+   ) VALUES ('memory', ?1, ?2, ?3, ?4, ?5, 0)
+   ON CONFLICT(entity_type, entity_id, model) DO UPDATE SET
+       dimensions = excluded.dimensions,
+       vector = excluded.vector,
+       source_generation = excluded.source_generation",
+                rusqlite::params![entity_id, model, vector.len() as i64, encoded, generation],
             )
             .expect("seed test vector");
     }

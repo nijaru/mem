@@ -7,7 +7,7 @@ use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use serde::Serialize;
 use uuid::Uuid;
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 const MEMORY_KINDS: &[&str] = &[
     "fact",
     "finding",
@@ -40,7 +40,6 @@ pub struct NewCorrection {
 }
 
 pub struct NewWorkspaceState {
-    pub project_id: String,
     pub workspace_id: String,
     pub last_session_id: Option<String>,
     pub active_goal: Option<String>,
@@ -49,13 +48,12 @@ pub struct NewWorkspaceState {
 }
 
 /// Fields `state patch` may update. Session/goal/task/checkpoint are the
-/// mutable payload; project and workspace identify the state row.
+/// mutable payload; workspace identifies the state row.
 pub const PATCHABLE_FIELDS: &[&str] = &["session", "goal", "task", "checkpoint"];
 
 /// Partial continuation-state update: only provided fields change.
 #[derive(Debug, Default)]
 pub struct NewWorkspaceStatePatch {
-    pub project_id: String,
     pub workspace_id: String,
     pub last_session_id: Option<String>,
     pub active_goal: Option<String>,
@@ -117,7 +115,6 @@ pub struct SearchHit {
 
 #[derive(Debug, Serialize)]
 pub struct WorkspaceState {
-    pub project_id: String,
     pub workspace_id: String,
     pub last_session_id: Option<String>,
     pub active_goal: Option<String>,
@@ -342,24 +339,14 @@ impl Store {
     /// rank below full matches instead of being discarded; explicit search
     /// must never return empty while the semantic tier finds the same
     /// corpus relevant.
-    pub fn search(
-        &self,
-        query: &str,
-        project_id: Option<&str>,
-        limit: usize,
-    ) -> Result<Vec<SearchHit>> {
-        self.search_fts(&crate::id_resolve::fts_query(query)?, project_id, limit)
+    pub fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
+        self.search_fts(&crate::id_resolve::fts_query(query)?, limit)
     }
 
     /// Broad lexical recall used by `mem context` when semantic ranking is
     /// unavailable or coverage is incomplete. Same OR matching as [`search`].
-    pub fn recall(
-        &self,
-        query: &str,
-        project_id: Option<&str>,
-        limit: usize,
-    ) -> Result<Vec<SearchHit>> {
-        self.search_fts(&crate::id_resolve::fts_query(query)?, project_id, limit)
+    pub fn recall(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
+        self.search_fts(&crate::id_resolve::fts_query(query)?, limit)
     }
 
     pub fn get(&self, id_or_prefix: &str) -> Result<MemoryRecord> {
@@ -424,29 +411,23 @@ impl Store {
         Ok(id)
     }
 
-    pub fn workspace_state(
-        &self,
-        project_id: &str,
-        workspace_id: &str,
-    ) -> Result<Option<WorkspaceState>> {
-        validate_identity(project_id, "project")?;
+    pub fn workspace_state(&self, workspace_id: &str) -> Result<Option<WorkspaceState>> {
         validate_identity(workspace_id, "workspace")?;
-
         Ok(self
             .connection
             .query_row(
-                "SELECT project_id, workspace_id, last_session_id, active_goal,\n\
-                        active_task_ref, checkpoint, updated_at\n\
-                 FROM workspace_state\n\
-                 WHERE project_id = ?1 AND workspace_id = ?2",
-                params![project_id, workspace_id],
+                "SELECT workspace_id, last_session_id, active_goal, active_task_ref, checkpoint, updated_at
+\
+                 FROM workspace_state
+\
+                 WHERE workspace_id = ?1",
+                [workspace_id],
                 workspace_state_from_row,
             )
             .optional()?)
     }
 
     pub fn set_workspace_state(&self, input: NewWorkspaceState) -> Result<WorkspaceState> {
-        validate_identity(&input.project_id, "project")?;
         validate_identity(&input.workspace_id, "workspace")?;
         validate_optional(&input.last_session_id, "session")?;
         validate_optional(&input.active_goal, "goal")?;
@@ -455,18 +436,24 @@ impl Store {
 
         let now = unix_millis()?;
         self.connection.execute(
-            "INSERT INTO workspace_state (\n\
-                 project_id, workspace_id, last_session_id, active_goal, active_task_ref,\n\
-                 checkpoint, updated_at\n\
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)\n\
-             ON CONFLICT(project_id, workspace_id) DO UPDATE SET\n\
-                 last_session_id = excluded.last_session_id,\n\
-                 active_goal = excluded.active_goal,\n\
-                 active_task_ref = excluded.active_task_ref,\n\
-                 checkpoint = excluded.checkpoint,\n\
+            "INSERT INTO workspace_state (
+\
+                 workspace_id, last_session_id, active_goal, active_task_ref, checkpoint, updated_at
+\
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+\
+             ON CONFLICT(workspace_id) DO UPDATE SET
+\
+                 last_session_id = excluded.last_session_id,
+\
+                 active_goal = excluded.active_goal,
+\
+                 active_task_ref = excluded.active_task_ref,
+\
+                 checkpoint = excluded.checkpoint,
+\
                  updated_at = excluded.updated_at",
             params![
-                &input.project_id,
                 &input.workspace_id,
                 &input.last_session_id,
                 &input.active_goal,
@@ -476,7 +463,7 @@ impl Store {
             ],
         )?;
 
-        self.workspace_state(&input.project_id, &input.workspace_id)?
+        self.workspace_state(&input.workspace_id)?
             .context("workspace state disappeared after write")
     }
 
@@ -486,7 +473,6 @@ impl Store {
     /// nulls that field. This is the partial-update primitive adapters use
     /// instead of read-merge-write, which races concurrent writers.
     pub fn patch_workspace_state(&self, input: NewWorkspaceStatePatch) -> Result<WorkspaceState> {
-        validate_identity(&input.project_id, "project")?;
         validate_identity(&input.workspace_id, "workspace")?;
         validate_optional(&input.last_session_id, "session")?;
         validate_optional(&input.active_goal, "goal")?;
@@ -501,17 +487,23 @@ impl Store {
         let now = unix_millis()?;
         self.connection.execute(
             "INSERT INTO workspace_state (
-                 project_id, workspace_id, last_session_id, active_goal, active_task_ref,
-                 checkpoint, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(project_id, workspace_id) DO UPDATE SET
-                 last_session_id = COALESCE(?3, CASE WHEN ?8 THEN NULL ELSE last_session_id END),
-                 active_goal = COALESCE(?4, CASE WHEN ?9 THEN NULL ELSE active_goal END),
-                 active_task_ref = COALESCE(?5, CASE WHEN ?10 THEN NULL ELSE active_task_ref END),
-                 checkpoint = COALESCE(?6, CASE WHEN ?11 THEN NULL ELSE checkpoint END),
-                 updated_at = ?7",
+\
+                 workspace_id, last_session_id, active_goal, active_task_ref, checkpoint, updated_at
+\
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+\
+             ON CONFLICT(workspace_id) DO UPDATE SET
+\
+                 last_session_id = COALESCE(?2, CASE WHEN ?7 THEN NULL ELSE last_session_id END),
+\
+                 active_goal = COALESCE(?3, CASE WHEN ?8 THEN NULL ELSE active_goal END),
+\
+                 active_task_ref = COALESCE(?4, CASE WHEN ?9 THEN NULL ELSE active_task_ref END),
+\
+                 checkpoint = COALESCE(?5, CASE WHEN ?10 THEN NULL ELSE checkpoint END),
+\
+                 updated_at = ?6",
             params![
-                &input.project_id,
                 &input.workspace_id,
                 &input.last_session_id,
                 &input.active_goal,
@@ -525,63 +517,42 @@ impl Store {
             ],
         )?;
 
-        self.workspace_state(&input.project_id, &input.workspace_id)?
+        self.workspace_state(&input.workspace_id)?
             .context("workspace state disappeared after write")
     }
 
-    pub fn clear_workspace_state(&self, project_id: &str, workspace_id: &str) -> Result<bool> {
-        validate_identity(project_id, "project")?;
+    pub fn clear_workspace_state(&self, workspace_id: &str) -> Result<bool> {
         validate_identity(workspace_id, "workspace")?;
         Ok(self.connection.execute(
-            "DELETE FROM workspace_state WHERE project_id = ?1 AND workspace_id = ?2",
-            params![project_id, workspace_id],
+            "DELETE FROM workspace_state WHERE workspace_id = ?1",
+            [workspace_id],
         )? > 0)
     }
 
-    fn search_fts(
-        &self,
-        query: &str,
-        project_id: Option<&str>,
-        limit: usize,
-    ) -> Result<Vec<SearchHit>> {
+    fn search_fts(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
         let limit = i64::try_from(limit)?;
+        let mut statement = self.connection.prepare(
+            "SELECT m.id, m.scope, m.project_id, m.kind, m.text, m.actor, m.status,
+\
+                    m.created_at, m.updated_at, m.deleted_at, bm25(memories_fts)
+\
+             FROM memories_fts
+\
+             JOIN memories AS m ON m.rowid = memories_fts.rowid
+\
+             WHERE memories_fts MATCH ?1
+\
+               AND m.status = 'active'
+\
+             ORDER BY bm25(memories_fts), m.updated_at DESC
+\
+             LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![query, limit], search_hit_from_row)?;
         let mut hits = Vec::new();
-
-        if let Some(project_id) = project_id {
-            let mut statement = self.connection.prepare(
-                "SELECT m.id, m.scope, m.project_id, m.kind, m.text, m.actor, m.status,\n\
-                        m.created_at, m.updated_at, m.deleted_at, bm25(memories_fts)\n\
-                 FROM memories_fts\n\
-                 JOIN memories AS m ON m.rowid = memories_fts.rowid\n\
-                 WHERE memories_fts MATCH ?1\n\
-                   AND m.status = 'active'\n\
-                   AND (m.project_id IS NULL OR m.project_id = ?2)\n\
-                 ORDER BY bm25(memories_fts), m.updated_at DESC\n\
-                 LIMIT ?3",
-            )?;
-            let rows =
-                statement.query_map(params![query, project_id, limit], search_hit_from_row)?;
-            for row in rows {
-                hits.push(row?);
-            }
-        } else {
-            let mut statement = self.connection.prepare(
-                "SELECT m.id, m.scope, m.project_id, m.kind, m.text, m.actor, m.status,\n\
-                        m.created_at, m.updated_at, m.deleted_at, bm25(memories_fts)\n\
-                 FROM memories_fts\n\
-                 JOIN memories AS m ON m.rowid = memories_fts.rowid\n\
-                 WHERE memories_fts MATCH ?1\n\
-                   AND m.status = 'active'\n\
-                   AND m.project_id IS NULL\n\
-                 ORDER BY bm25(memories_fts), m.updated_at DESC\n\
-                 LIMIT ?2",
-            )?;
-            let rows = statement.query_map(params![query, limit], search_hit_from_row)?;
-            for row in rows {
-                hits.push(row?);
-            }
+        for row in rows {
+            hits.push(row?);
         }
-
         Ok(hits)
     }
 
@@ -634,6 +605,10 @@ impl Store {
                 include_str!("../migrations/0005_episode_vectors_disabled.sql"),
                 4,
             )?;
+        }
+
+        if self.schema_version()? == 5 {
+            apply(include_str!("../migrations/0006_workspace_local.sql"), 5)?;
         }
 
         let version = self.schema_version()?;
@@ -781,13 +756,12 @@ fn search_hit_from_row(row: &Row<'_>) -> rusqlite::Result<SearchHit> {
 
 fn workspace_state_from_row(row: &Row<'_>) -> rusqlite::Result<WorkspaceState> {
     Ok(WorkspaceState {
-        project_id: row.get(0)?,
-        workspace_id: row.get(1)?,
-        last_session_id: row.get(2)?,
-        active_goal: row.get(3)?,
-        active_task_ref: row.get(4)?,
-        checkpoint: row.get(5)?,
-        updated_at: row.get(6)?,
+        workspace_id: row.get(0)?,
+        last_session_id: row.get(1)?,
+        active_goal: row.get(2)?,
+        active_task_ref: row.get(3)?,
+        checkpoint: row.get(4)?,
+        updated_at: row.get(5)?,
     })
 }
 
@@ -827,14 +801,13 @@ mod tests {
 
         assert!(
             store
-                .workspace_state("github.com/nijaru/mem", "branch:main")
+                .workspace_state("branch:main")
                 .expect("read empty state")
                 .is_none()
         );
 
         let state = store
             .set_workspace_state(NewWorkspaceState {
-                project_id: "github.com/nijaru/mem".to_owned(),
                 workspace_id: "branch:main".to_owned(),
                 last_session_id: Some("session-1".to_owned()),
                 active_goal: Some("build continuation state".to_owned()),
@@ -850,12 +823,12 @@ mod tests {
 
         assert!(
             store
-                .clear_workspace_state("github.com/nijaru/mem", "branch:main")
+                .clear_workspace_state("branch:main")
                 .expect("clear state")
         );
         assert!(
             store
-                .workspace_state("github.com/nijaru/mem", "branch:main")
+                .workspace_state("branch:main")
                 .expect("read cleared state")
                 .is_none()
         );
@@ -863,7 +836,6 @@ mod tests {
         let store = Store::open(&test_path()).expect("open patch store");
         store
             .set_workspace_state(NewWorkspaceState {
-                project_id: "github.com/nijaru/mem".to_owned(),
                 workspace_id: "branch:main".to_owned(),
                 last_session_id: Some("session-1".to_owned()),
                 active_goal: Some("build continuation state".to_owned()),
@@ -875,7 +847,6 @@ mod tests {
         // Patch only the checkpoint: every other field must survive.
         let state = store
             .patch_workspace_state(NewWorkspaceStatePatch {
-                project_id: "github.com/nijaru/mem".to_owned(),
                 workspace_id: "branch:main".to_owned(),
                 checkpoint: Some("v2".to_owned()),
                 ..Default::default()
@@ -892,7 +863,6 @@ mod tests {
         // Explicit clear nulls exactly the named fields.
         let state = store
             .patch_workspace_state(NewWorkspaceStatePatch {
-                project_id: "github.com/nijaru/mem".to_owned(),
                 workspace_id: "branch:main".to_owned(),
                 clear_fields: vec!["goal".to_owned(), "task".to_owned()],
                 ..Default::default()
@@ -906,7 +876,6 @@ mod tests {
         // Patch on a missing row creates it with only the provided fields.
         let state = store
             .patch_workspace_state(NewWorkspaceStatePatch {
-                project_id: "github.com/nijaru/mem".to_owned(),
                 workspace_id: "branch:feature".to_owned(),
                 active_goal: Some("resume work".to_owned()),
                 ..Default::default()
@@ -918,7 +887,6 @@ mod tests {
         // Unknown field names are rejected instead of silently ignored.
         let error = store
             .patch_workspace_state(NewWorkspaceStatePatch {
-                project_id: "github.com/nijaru/mem".to_owned(),
                 workspace_id: "branch:main".to_owned(),
                 clear_fields: vec!["project".to_owned()],
                 ..Default::default()
@@ -935,7 +903,6 @@ mod tests {
         let writer = Store::open(std::path::Path::new(db_path)).expect("open second writer");
         writer
             .patch_workspace_state(NewWorkspaceStatePatch {
-                project_id: "github.com/nijaru/mem".to_owned(),
                 workspace_id: "branch:main".to_owned(),
                 active_goal: Some("writer goal".to_owned()),
                 ..Default::default()
@@ -943,7 +910,6 @@ mod tests {
             .expect("concurrent goal patch");
         let state = store
             .patch_workspace_state(NewWorkspaceStatePatch {
-                project_id: "github.com/nijaru/mem".to_owned(),
                 workspace_id: "branch:main".to_owned(),
                 active_task_ref: Some("tk-7".to_owned()),
                 ..Default::default()
@@ -993,13 +959,13 @@ mod tests {
         // found five hits on the same corpus — the two tiers must never
         // silently disagree about whether relevant memory exists.
         let ranked = store
-            .search("publication preference", Some(project), 10)
+            .search("publication preference", 10)
             .expect("ranked lexical search");
         assert_eq!(ranked.len(), 2);
         // Full term matches rank above partial matches under bm25.
         assert!(ranked[0].rank <= ranked[1].rank, "hits must be ranked");
         let recalled = store
-            .recall("publication preference", Some(project), 10)
+            .recall("publication preference", 10)
             .expect("broad recall");
         assert_eq!(recalled.len(), 2);
 
@@ -1157,7 +1123,7 @@ mod tests {
         let reopened = Store::open_existing(&path)
             .expect("probe existing store")
             .expect("existing file opens");
-        assert_eq!(reopened.stats().expect("read stats").schema_version, 5);
+        assert_eq!(reopened.stats().expect("read stats").schema_version, 6);
 
         drop(reopened);
         cleanup(&path);
@@ -1215,15 +1181,12 @@ mod tests {
         assert_eq!(original_record.relations.len(), 1);
         assert!(
             store
-                .search("active", Some(project), 10)
+                .search("active", 10)
                 .expect("search superseded wording")
                 .is_empty()
         );
         assert_eq!(
-            store
-                .search("beta", Some(project), 10)
-                .expect("search replacement")
-                .len(),
+            store.search("beta", 10).expect("search replacement").len(),
             1
         );
 

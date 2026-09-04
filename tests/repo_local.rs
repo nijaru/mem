@@ -58,7 +58,7 @@ fn absent_store_reads_do_not_initialize_storage() {
     assert_eq!(status["schema_version"], 0);
     assert_eq!(status["total"], 0);
     assert_eq!(
-        run_json(&cwd, &["search", "nothing", "--global"])
+        run_json(&cwd, &["search", "nothing"])
             .as_array()
             .map(Vec::len),
         Some(0)
@@ -78,13 +78,7 @@ fn write_initializes_repo_local_storage_without_init() {
     let cwd = temp_dir();
     let value = run_json(
         &cwd,
-        &[
-            "remember",
-            "repo-local memory",
-            "--global",
-            "--source-type",
-            "test",
-        ],
+        &["remember", "repo-local memory", "--source-type", "test"],
     );
     assert_eq!(value["text"], "repo-local memory");
     assert!(cwd.join(".mem/mem.db").is_file());
@@ -102,7 +96,6 @@ fn explicit_database_bypasses_repo_local_storage() {
             db.to_str().unwrap(),
             "remember",
             "exact memory",
-            "--global",
             "--source-type",
             "test",
         ])

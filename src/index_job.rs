@@ -459,7 +459,7 @@ mod tests {
         drop(connection);
 
         let store = Store::open(&path).expect("migrate v4 database");
-        assert_eq!(store.stats().expect("read store stats").schema_version, 5);
+        assert_eq!(store.stats().expect("read store stats").schema_version, 6);
         let stats = store.index_job_stats().expect("read job stats");
         assert_eq!(stats.pending, 0);
         assert_eq!(stats.running, 0);
@@ -520,7 +520,7 @@ mod tests {
         drop(connection);
 
         let store = Store::open(&path).expect("migrate v2 database");
-        assert_eq!(store.stats().expect("read stats").schema_version, 5);
+        assert_eq!(store.stats().expect("read stats").schema_version, 6);
         // The v3 migration enqueues embedding work for both the memory and
         // the episode entry; v4 would keep both; v5 drains the episode entry
         // because no reader consumes episode-entry vectors.

@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use serde::Serialize;
 use usage::{Args, Cli, Subcommands};
 
@@ -72,10 +72,6 @@ struct Status;
 /// Show the detected project and workspace identity.
 #[derive(Args)]
 struct Project {
-    /// Override the project identifier.
-    #[usage(long)]
-    project: Option<String>,
-
     /// Override the workspace identifier.
     #[usage(long)]
     workspace: Option<String>,
@@ -99,10 +95,6 @@ enum StateCommand {
 /// Show continuation state for the current workspace.
 #[derive(Args)]
 struct StateShow {
-    /// Override the project identifier.
-    #[usage(long)]
-    project: Option<String>,
-
     /// Override the workspace identifier.
     #[usage(long)]
     workspace: Option<String>,
@@ -111,10 +103,6 @@ struct StateShow {
 /// Replace continuation state for the current workspace.
 #[derive(Args)]
 struct StateSet {
-    /// Override the project identifier.
-    #[usage(long)]
-    project: Option<String>,
-
     /// Override the workspace identifier.
     #[usage(long)]
     workspace: Option<String>,
@@ -140,10 +128,6 @@ struct StateSet {
 /// state; omitted fields keep their current values.
 #[derive(Args)]
 struct StatePatch {
-    /// Override the project identifier.
-    #[usage(long)]
-    project: Option<String>,
-
     /// Override the workspace identifier.
     #[usage(long)]
     workspace: Option<String>,
@@ -173,10 +157,6 @@ struct StatePatch {
 /// Remove continuation state for the current workspace.
 #[derive(Args)]
 struct StateClear {
-    /// Override the project identifier.
-    #[usage(long)]
-    project: Option<String>,
-
     /// Override the workspace identifier.
     #[usage(long)]
     workspace: Option<String>,
@@ -187,10 +167,6 @@ struct StateClear {
 struct ContextCommand {
     /// Prompt or query to recall relevant memory for.
     query: String,
-
-    /// Override the current project identifier.
-    #[usage(long)]
-    project: Option<String>,
 
     /// Override the current workspace identifier.
     #[usage(long)]
@@ -215,14 +191,6 @@ struct Remember {
     /// Memory kind: fact, finding, decision, constraint, preference, or procedure.
     #[usage(long)]
     kind: Option<String>,
-
-    /// Override the current project identifier.
-    #[usage(long)]
-    project: Option<String>,
-
-    /// Store user-wide memory instead of project memory.
-    #[usage(long = "global")]
-    global_memory: bool,
 
     /// Actor that established the memory, such as user or agent.
     #[usage(long)]
@@ -268,14 +236,6 @@ struct Correct {
 struct Search {
     /// Search query.
     query: String,
-
-    /// Override the current project identifier.
-    #[usage(long)]
-    project: Option<String>,
-
-    /// Search only user-wide global memory.
-    #[usage(long = "global")]
-    global_memory: bool,
 
     /// Use local embeddings and exact cosine similarity instead of FTS5.
     #[usage(long)]
@@ -422,14 +382,13 @@ struct StatusOutput {
 
 #[derive(Serialize)]
 struct ClearStateOutput<'a> {
-    project_id: &'a str,
     workspace_id: &'a str,
     cleared: bool,
 }
 
 #[derive(Serialize)]
 struct ContextOutput {
-    project: Option<ProjectContext>,
+    project: ProjectContext,
     state: Option<WorkspaceState>,
     memories: Vec<ContextMemory>,
 }
@@ -573,47 +532,32 @@ fn run(cli: MemCli) -> Result<()> {
             }
         }
         Command::Project(command) => {
-            let context =
-                project_context(command.project.as_deref(), command.workspace.as_deref())?;
+            let context = ProjectContext::detect(command.workspace.as_deref())?;
             if cli.json {
                 print_json(&context)?;
             } else {
-                println!("project: {}", context.project_id);
-                println!("workspace: {}", context.workspace_id);
                 if let Some(root) = &context.root {
                     println!("root: {}", root.display());
                 }
-                if let Some(remote) = &context.remote {
-                    println!("remote: {remote}");
-                }
+                println!("workspace: {}", context.workspace_id);
             }
         }
         Command::State(command) => match command.command {
             StateCommand::Show(command) => {
-                let context =
-                    project_context(command.project.as_deref(), command.workspace.as_deref())?;
-                let state = crate::storage::routed_workspace_state(
-                    &router,
-                    &context.project_id,
-                    &context.workspace_id,
-                )?;
+                let context = ProjectContext::detect(command.workspace.as_deref())?;
+                let state = crate::storage::routed_workspace_state(&router, &context.workspace_id)?;
                 if cli.json {
                     print_json(&state)?;
                 } else if let Some(state) = state {
                     print_workspace_state(&state);
                 } else {
-                    println!(
-                        "no state for {} {}",
-                        context.project_id, context.workspace_id
-                    );
+                    println!("no state for {}", context.workspace_id);
                 }
             }
             StateCommand::Set(command) => {
-                let context =
-                    project_context(command.project.as_deref(), command.workspace.as_deref())?;
-                let store = router.write_store(Some(&context.project_id))?;
+                let context = ProjectContext::detect(command.workspace.as_deref())?;
+                let store = router.write_store()?;
                 let state = store.set_workspace_state(NewWorkspaceState {
-                    project_id: context.project_id,
                     workspace_id: context.workspace_id,
                     last_session_id: command.session,
                     active_goal: command.goal,
@@ -627,11 +571,9 @@ fn run(cli: MemCli) -> Result<()> {
                 }
             }
             StateCommand::Patch(command) => {
-                let context =
-                    project_context(command.project.as_deref(), command.workspace.as_deref())?;
-                let store = router.write_store(Some(&context.project_id))?;
+                let context = ProjectContext::detect(command.workspace.as_deref())?;
+                let store = router.write_store()?;
                 let state = store.patch_workspace_state(NewWorkspaceStatePatch {
-                    project_id: context.project_id,
                     workspace_id: context.workspace_id,
                     last_session_id: command.session,
                     active_goal: command.goal,
@@ -646,56 +588,27 @@ fn run(cli: MemCli) -> Result<()> {
                 }
             }
             StateCommand::Clear(command) => {
-                let context =
-                    project_context(command.project.as_deref(), command.workspace.as_deref())?;
-                let store = router.write_store(Some(&context.project_id))?;
-                let cleared =
-                    store.clear_workspace_state(&context.project_id, &context.workspace_id)?;
+                let context = ProjectContext::detect(command.workspace.as_deref())?;
+                let store = router.write_store()?;
+                let cleared = store.clear_workspace_state(&context.workspace_id)?;
                 if cli.json {
                     print_json(&ClearStateOutput {
-                        project_id: &context.project_id,
                         workspace_id: &context.workspace_id,
                         cleared,
                     })?;
                 } else if cleared {
-                    println!(
-                        "cleared state for {} {}",
-                        context.project_id, context.workspace_id
-                    );
+                    println!("cleared state for {}", context.workspace_id);
                 } else {
-                    println!(
-                        "no state for {} {}",
-                        context.project_id, context.workspace_id
-                    );
+                    println!("no state for {}", context.workspace_id);
                 }
             }
         },
         Command::Context(command) => {
-            let project =
-                optional_project_context(command.project.as_deref(), command.workspace.as_deref())?;
-            let state = if let Some(project) = project.as_ref() {
-                crate::storage::routed_workspace_state(
-                    &router,
-                    &project.project_id,
-                    &project.workspace_id,
-                )?
-            } else {
-                None
-            };
-            let project_id = project.as_ref().map(|project| project.project_id.as_str());
+            let project = ProjectContext::detect(command.workspace.as_deref())?;
+            let state = crate::storage::routed_workspace_state(&router, &project.workspace_id)?;
             let limit = command.limit.unwrap_or(10).clamp(1, 100);
             let max_bytes = command.max_bytes.unwrap_or(RECALL_DEFAULT_MAX_BYTES);
-            let hits = crate::storage::routed_recall_hits(
-                &router,
-                project_id,
-                &command.query,
-                limit,
-                false,
-            )?;
-            // Rank order, byte-bounded: a single huge memory can no longer
-            // crowd an adapter's context window. The first hit is always
-            // included when any budget allows it, so a query matching one
-            // oversized memory still surfaces something.
+            let hits = crate::storage::routed_recall_hits(&router, &command.query, limit)?;
             let mut memories = Vec::new();
             let mut total = 0usize;
             for hit in hits {
@@ -704,8 +617,7 @@ fn run(cli: MemCli) -> Result<()> {
                     break;
                 }
                 total += text_bytes;
-                let (store, id) =
-                    crate::storage::routed_resolve_memory(&router, project_id, &hit.memory.id)?;
+                let (store, id) = crate::storage::routed_resolve_memory(&router, &hit.memory.id)?;
                 let record = store.get(&id)?;
                 memories.push(ContextMemory {
                     memory: record.memory,
@@ -724,12 +636,11 @@ fn run(cli: MemCli) -> Result<()> {
             }
         }
         Command::Remember(command) => {
-            let project_id = memory_project(command.project.as_deref(), command.global_memory)?;
-            let mut store = router.write_store(project_id.as_deref())?;
+            let mut store = router.write_store()?;
             let memory = store.remember(NewMemory {
                 text: command.text,
                 kind: command.kind.unwrap_or_else(|| "fact".to_owned()),
-                project_id,
+                project_id: Some("local".to_owned()),
                 actor: command.actor.unwrap_or_else(|| "agent".to_owned()),
                 source_type: command.source_type.unwrap_or_else(|| "cli".to_owned()),
                 source_ref: command.source_ref,
@@ -737,12 +648,11 @@ fn run(cli: MemCli) -> Result<()> {
             if cli.json {
                 print_json(&memory)?;
             } else {
-                println!("{}\t{}\t{}", memory.id, memory.kind, memory.text);
+                println!("{}	{}	{}", memory.id, memory.kind, memory.text);
             }
         }
         Command::Correct(command) => {
-            let (mut store, id) =
-                crate::storage::routed_resolve_memory(&router, None, &command.id)?;
+            let (mut store, id) = crate::storage::routed_resolve_memory(&router, &command.id)?;
             let result = store.correct(
                 &id,
                 NewCorrection {
@@ -769,68 +679,40 @@ fn run(cli: MemCli) -> Result<()> {
             }
         }
         Command::Search(command) => {
-            let project_id = memory_project(command.project.as_deref(), command.global_memory)?;
             let limit = command.limit.unwrap_or(10).clamp(1, 100);
             if command.semantic {
                 let cache_dir = model_cache_dir()?;
                 let query_vector = embed_query(&command.query, &cache_dir, !cli.json)?;
-                let hits = crate::storage::routed_semantic_search(
-                    &router,
-                    project_id.as_deref(),
-                    &query_vector,
-                    limit,
-                )?;
+                let hits = crate::storage::routed_semantic_search(&router, &query_vector, limit)?;
                 if cli.json {
                     print_json(&hits)?;
                 } else {
                     for hit in hits {
-                        let scope = hit
-                            .memory
-                            .project_id
-                            .as_deref()
-                            .map_or("global", |project| project);
                         println!(
-                            "{}\t{}\t{}\t{:.6}\t{}",
-                            hit.memory.id, hit.memory.kind, scope, hit.score, hit.memory.text
+                            "{}	{}	{:.6}	{}",
+                            hit.memory.id, hit.memory.kind, hit.score, hit.memory.text
                         );
                     }
                 }
             } else {
-                let hits = crate::storage::routed_lexical_search(
-                    &router,
-                    project_id.as_deref(),
-                    &command.query,
-                    limit,
-                )?;
+                let hits = crate::storage::routed_lexical_search(&router, &command.query, limit)?;
                 if cli.json {
                     print_json(&hits)?;
                 } else {
                     for hit in hits {
-                        let scope = hit
-                            .memory
-                            .project_id
-                            .as_deref()
-                            .map_or("global", |project| project);
-                        println!(
-                            "{}\t{}\t{}\t{}",
-                            hit.memory.id, hit.memory.kind, scope, hit.memory.text
-                        );
+                        println!("{}	{}	{}", hit.memory.id, hit.memory.kind, hit.memory.text);
                     }
                 }
             }
         }
         Command::Get(command) => {
-            let (store, id) = crate::storage::routed_resolve_memory(&router, None, &command.id)?;
+            let (store, id) = crate::storage::routed_resolve_memory(&router, &command.id)?;
             let record = store.get(&id)?;
             if cli.json {
                 print_json(&record)?;
             } else {
                 println!("id: {}", record.memory.id);
                 println!("kind: {}", record.memory.kind);
-                println!("scope: {}", record.memory.scope);
-                if let Some(project) = &record.memory.project_id {
-                    println!("project: {project}");
-                }
                 println!("actor: {}", record.memory.actor);
                 println!("status: {}", record.memory.status);
                 println!("text: {}", record.memory.text);
@@ -847,7 +729,7 @@ fn run(cli: MemCli) -> Result<()> {
             }
         }
         Command::Forget(command) => {
-            let (store, id) = crate::storage::routed_resolve_memory(&router, None, &command.id)?;
+            let (store, id) = crate::storage::routed_resolve_memory(&router, &command.id)?;
             let id = store.forget(&id)?;
             if cli.json {
                 print_json(&serde_json::json!({ "id": id, "status": "deleted" }))?;
@@ -857,9 +739,7 @@ fn run(cli: MemCli) -> Result<()> {
         }
         Command::Index(command) => match command.command {
             IndexSubcommand::Status(_) => {
-                let context = optional_project_context(None, None)?;
-                let project_id = context.as_ref().map(|c| c.project_id.as_str());
-                let stats = crate::storage::routed_index_stats(&router, project_id)?;
+                let stats = crate::storage::routed_index_stats(&router)?;
                 if cli.json {
                     print_json(&stats)?;
                 } else {
@@ -868,12 +748,8 @@ fn run(cli: MemCli) -> Result<()> {
                 }
             }
             IndexSubcommand::Run(command) => {
-                let context = optional_project_context(None, None)?;
-                let project_id = context.as_ref().map(|c| c.project_id.as_str());
                 let stats = crate::storage::routed_run_index(
                     &router,
-                    project_id,
-                    false,
                     EmbeddingRunOptions {
                         limit: command.limit.unwrap_or(64).min(1000),
                         lease_duration: Duration::from_secs(
@@ -1009,63 +885,17 @@ fn run(cli: MemCli) -> Result<()> {
     Ok(())
 }
 
-fn optional_project_context(
-    project: Option<&str>,
-    workspace: Option<&str>,
-) -> Result<Option<ProjectContext>> {
-    let context = ProjectContext::detect(project, workspace)?;
-    if context.is_none() && workspace.is_some() {
-        bail!("--workspace requires a detected or explicit project");
-    }
-    Ok(context)
-}
-
-fn project_context(project: Option<&str>, workspace: Option<&str>) -> Result<ProjectContext> {
-    optional_project_context(project, workspace)?
-        .context("no project detected; run inside a Git repository or pass --project")
-}
-
-fn memory_project(explicit: Option<&str>, global: bool) -> Result<Option<String>> {
-    if global && explicit.is_some() {
-        bail!("--global conflicts with --project");
-    }
-    if global {
-        return Ok(None);
-    }
-    if let Some(project) = explicit {
-        let project = project.trim();
-        if project.is_empty() {
-            bail!("project identifier cannot be empty");
-        }
-        return Ok(Some(project.to_owned()));
-    }
-
-    Ok(ProjectContext::detect(None, None)?.map(|context| context.project_id))
-}
-
 /// Semantic-first recall with lexical-OR fallback for `mem context`.
 /// Embeddings are a derived enhancement: when the model is not cached, the
 /// cache directory cannot be determined, local embedding fails, or any
 /// visible active memory still lacks a current-model vector, recall degrades
 /// to the FTS5 baseline. Incomplete embedding coverage must never make a
 /// canonical active memory disappear from recall.
-pub fn recall_hits(
-    store: &Store,
-    query: &str,
-    project_id: Option<&str>,
-    limit: usize,
-    force_lexical: bool,
-) -> Result<Vec<SearchHit>> {
-    if !force_lexical
-        && store.has_complete_scope_coverage(EMBEDDING_MODEL_ID, project_id)?
+pub fn recall_hits(store: &Store, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
+    if store.has_complete_coverage(EMBEDDING_MODEL_ID)?
         && let Some(query_vector) = cached_query_vector(query)?
     {
-        let hits = store.semantic_search_by_vector(
-            &query_vector,
-            EMBEDDING_MODEL_ID,
-            project_id,
-            limit,
-        )?;
+        let hits = store.semantic_search_by_vector(&query_vector, EMBEDDING_MODEL_ID, limit)?;
         return Ok(hits
             .into_iter()
             .filter(|hit| hit.score >= SEMANTIC_CONTEXT_MIN_SCORE)
@@ -1075,7 +905,7 @@ pub fn recall_hits(
             })
             .collect());
     }
-    store.recall(query, project_id, limit)
+    store.recall(query, limit)
 }
 
 fn cached_query_vector(query: &str) -> Result<Option<Vec<f32>>> {
@@ -1087,13 +917,10 @@ fn cached_query_vector(query: &str) -> Result<Option<Vec<f32>>> {
 }
 
 fn print_context(output: &ContextOutput) {
-    if let Some(project) = &output.project {
-        println!("project: {}", project.project_id);
-        println!("workspace: {}", project.workspace_id);
-    } else {
-        println!("project: global");
+    if let Some(root) = &output.project.root {
+        println!("root: {}", root.display());
     }
-
+    println!("workspace: {}", output.project.workspace_id);
     if let Some(state) = &output.state {
         println!("state:");
         if let Some(session) = &state.last_session_id {
@@ -1109,17 +936,11 @@ fn print_context(output: &ContextOutput) {
             println!("  checkpoint: {checkpoint}");
         }
     }
-
     println!("memories:");
     for item in &output.memories {
-        let scope = item
-            .memory
-            .project_id
-            .as_deref()
-            .map_or("global", |project| project);
         println!(
-            "  {}\t{}\t{}\t{}",
-            item.memory.id, item.memory.kind, scope, item.memory.text
+            "  {}	{}	{}",
+            item.memory.id, item.memory.kind, item.memory.text
         );
         for source in &item.sources {
             let locator = source.locator.as_deref().unwrap_or("-");
@@ -1129,7 +950,6 @@ fn print_context(output: &ContextOutput) {
 }
 
 fn print_workspace_state(state: &WorkspaceState) {
-    println!("project: {}", state.project_id);
     println!("workspace: {}", state.workspace_id);
     if let Some(session) = &state.last_session_id {
         println!("session: {session}");
@@ -1159,8 +979,8 @@ fn database_path(override_path: Option<&Path>) -> Result<PathBuf> {
     }
 
     let cwd = std::env::current_dir().context("determine current directory")?;
-    let project = ProjectContext::detect(None, None)?;
-    if let Some(root) = project.as_ref().and_then(|context| context.root.as_ref()) {
+    let project = ProjectContext::detect(None)?;
+    if let Some(root) = project.root.as_ref() {
         for ancestor in cwd.ancestors() {
             let mem_dir = ancestor.join(".mem");
             if mem_dir.is_dir() {
@@ -1218,10 +1038,6 @@ fn print_json(value: &impl Serialize) -> Result<()> {
 
 #[cfg(test)]
 mod cli_parse_tests {
-    //! Arg-matrix tests for the CLI surface: every command parses with its
-    //! documented flags, defaults hold, and scope-flag coverage matches the
-    //! help text. Parsing is pure, so no process or database is involved.
-
     use super::{Command, MemCli, parse_cli};
 
     fn parse(args: &str) -> MemCli {
@@ -1234,41 +1050,26 @@ mod cli_parse_tests {
     #[test]
     fn remember_flags_and_defaults() {
         let cli = parse(
-            "remember text-here --kind fact --global --actor agent --source-type cli --source-ref r",
+            "remember text-here --kind finding --actor agent --source-type cli --source-ref r",
         );
         let Command::Remember(command) = &cli.command else {
             panic!("expected remember");
         };
         assert_eq!(command.text, "text-here");
-        assert_eq!(command.kind.as_deref(), Some("fact"));
-        assert!(command.global_memory);
+        assert_eq!(command.kind.as_deref(), Some("finding"));
         assert_eq!(command.actor.as_deref(), Some("agent"));
         assert_eq!(command.source_type.as_deref(), Some("cli"));
         assert_eq!(command.source_ref.as_deref(), Some("r"));
-        assert!(command.project.is_none());
     }
 
     #[test]
-    fn search_scope_and_tier_flags() {
-        let cli = parse("search q --global --semantic -n 3 --project proj");
+    fn search_has_one_store_and_optional_semantic_tier() {
+        let cli = parse("search q --semantic -n 3");
         let Command::Search(command) = &cli.command else {
             panic!("expected search");
         };
-        assert!(command.global_memory);
         assert!(command.semantic);
         assert_eq!(command.limit, Some(3));
-        assert_eq!(command.project.as_deref(), Some("proj"));
-    }
-
-    #[test]
-    fn id_commands_take_no_scope_flags() {
-        // ID-directed operations resolve inside the current project store.
-        let get = parse("get 01abc");
-        assert!(matches!(get.command, super::Command::Get(_)));
-        let forget = parse("forget 01abc");
-        assert!(matches!(forget.command, super::Command::Forget(_)));
-        let correct = parse("correct 01abc new-text");
-        assert!(matches!(correct.command, super::Command::Correct(_)));
     }
 
     #[test]

@@ -24,7 +24,7 @@ impl StorageRouter {
         &self.path
     }
 
-    pub fn write_store(&self, _project_id: Option<&str>) -> Result<Store> {
+    pub fn write_store(&self) -> Result<Store> {
         Store::open(&self.path)
     }
 
@@ -35,7 +35,6 @@ impl StorageRouter {
 
 pub fn routed_resolve_memory(
     router: &StorageRouter,
-    _project_hint: Option<&str>,
     id_or_prefix: &str,
 ) -> Result<(Store, String)> {
     resolve_id(router, id_or_prefix, "memory", |store, candidate| {
@@ -72,50 +71,45 @@ where
 
 pub fn routed_recall_hits(
     router: &StorageRouter,
-    project_id: Option<&str>,
     query: &str,
     limit: usize,
-    force_lexical: bool,
 ) -> Result<Vec<SearchHit>> {
     let Some(store) = router.read_store()? else {
         return Ok(Vec::new());
     };
-    crate::recall_hits(&store, query, project_id, limit, force_lexical)
+    crate::recall_hits(&store, query, limit)
 }
 
 pub fn routed_lexical_search(
     router: &StorageRouter,
-    project_id: Option<&str>,
     query: &str,
     limit: usize,
 ) -> Result<Vec<SearchHit>> {
     let Some(store) = router.read_store()? else {
         return Ok(Vec::new());
     };
-    store.search(query, project_id, limit)
+    store.search(query, limit)
 }
 
 pub fn routed_semantic_search(
     router: &StorageRouter,
-    project_id: Option<&str>,
     query_vector: &[f32],
     limit: usize,
 ) -> Result<Vec<SemanticSearchHit>> {
     let Some(store) = router.read_store()? else {
         return Ok(Vec::new());
     };
-    store.semantic_search_by_vector(query_vector, EMBEDDING_MODEL_ID, project_id, limit)
+    store.semantic_search_by_vector(query_vector, EMBEDDING_MODEL_ID, limit)
 }
 
 pub fn routed_workspace_state(
     router: &StorageRouter,
-    project_id: &str,
     workspace_id: &str,
 ) -> Result<Option<WorkspaceState>> {
     let Some(store) = router.read_store()? else {
         return Ok(None);
     };
-    store.workspace_state(project_id, workspace_id)
+    store.workspace_state(workspace_id)
 }
 
 #[derive(Debug, Serialize)]
@@ -132,8 +126,6 @@ pub struct RoutedRunStats {
 
 pub fn routed_run_index(
     router: &StorageRouter,
-    _project_id: Option<&str>,
-    _all: bool,
     options: EmbeddingRunOptions,
 ) -> Result<RoutedRunStats> {
     let mut stats = RoutedRunStats {
@@ -158,10 +150,7 @@ pub fn routed_run_index(
     Ok(stats)
 }
 
-pub fn routed_index_stats(
-    router: &StorageRouter,
-    _project_id: Option<&str>,
-) -> Result<IndexJobStats> {
+pub fn routed_index_stats(router: &StorageRouter) -> Result<IndexJobStats> {
     let Some(store) = router.read_store()? else {
         return Ok(IndexJobStats {
             pending: 0,

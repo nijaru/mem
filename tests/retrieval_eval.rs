@@ -5,7 +5,6 @@ use std::process::Command;
 use serde_json::Value;
 use uuid::Uuid;
 
-const PROJECT: &str = "retrieval-eval";
 const WORKSPACE: &str = "main";
 const LIMIT: usize = 10;
 const RRF_K: f64 = 60.0;
@@ -14,7 +13,6 @@ struct Seed<'a> {
     key: &'a str,
     text: &'a str,
     kind: &'a str,
-    project: Option<&'a str>,
 }
 
 struct Case<'a> {
@@ -77,10 +75,6 @@ fn compare_lexical_semantic_and_rrf_retrieval() {
         Some(seeds.len() as u64),
         "all seeded memories should be embedded: {index}"
     );
-
-    let other_project_id = ids
-        .get("other-project-distractor")
-        .expect("other-project distractor ID");
     let mut lexical_metrics = Metrics::default();
     let mut semantic_metrics = Metrics::default();
     let mut equal_rrf_metrics = Metrics::default();
@@ -95,19 +89,6 @@ fn compare_lexical_semantic_and_rrf_retrieval() {
         let lexical = context_ids(&db, case.query, true);
         let semantic = semantic_ids(&db, case.query);
         let context_default = context_ids(&db, case.query, false);
-
-        assert!(
-            !lexical.contains(other_project_id),
-            "lexical retrieval leaked other-project memory"
-        );
-        assert!(
-            !semantic.contains(other_project_id),
-            "semantic retrieval leaked other-project memory"
-        );
-        assert!(
-            !context_default.contains(other_project_id),
-            "default context ranking leaked other-project memory"
-        );
 
         let equal_rrf = rrf(&lexical, &semantic, 1.0, 1.0, LIMIT);
         let semantic_weighted = rrf(&lexical, &semantic, 1.0, 2.0, LIMIT);
@@ -156,7 +137,7 @@ fn incomplete_embedding_coverage_never_hides_active_memories() {
     let embedded = remember_text(
         &db,
         "Deployments require glibc 2.35 on Ubuntu 22.04 for the ort runtime.",
-        Some(PROJECT),
+        None,
     );
     run_json(&db, &["index", "run", "-n", "1"]);
 
@@ -164,7 +145,7 @@ fn incomplete_embedding_coverage_never_hides_active_memories() {
     let fresh = remember_text(
         &db,
         "Paraphrase queries with no shared vocabulary still rank semantically in the retrieval evaluation.",
-        Some(PROJECT),
+        None,
     );
     let ids = context_ids(&db, "shared vocabulary rank semantically", false);
     assert!(
@@ -234,16 +215,10 @@ fn incomplete_embedding_coverage_never_hides_active_memories() {
     cleanup(&db);
 }
 
-fn remember_text(db: &Path, text: &str, project: Option<&str>) -> String {
-    let mut args = vec!["remember", text];
-    if let Some(project) = project {
-        args.extend(["--project", project]);
-    } else {
-        args.push("--global");
-    }
-    run_json(db, &args)["id"]
+fn remember_text(db: &Path, text: &str, _legacy_scope: Option<&str>) -> String {
+    run_json(db, &["remember", text])["id"]
         .as_str()
-        .expect("remember JSON should contain memory ID")
+        .expect("id")
         .to_owned()
 }
 
@@ -253,91 +228,71 @@ fn corpus() -> Vec<Seed<'static>> {
             key: "workspace",
             text: "Continuation state is scoped to a project plus workspace so separate branches and worktrees do not overwrite each other's active state.",
             kind: "decision",
-            project: Some(PROJECT),
         },
         Seed {
             key: "stale",
             text: "When canonical source text changes, stale embeddings must be invalidated immediately and rebuilt for the new source generation.",
             kind: "constraint",
-            project: Some(PROJECT),
         },
         Seed {
             key: "github",
             text: "The core memory CLI is agent-neutral and must not depend on GitHub; backup or push automation belongs in an external wrapper.",
             kind: "decision",
-            project: Some(PROJECT),
         },
         Seed {
             key: "storage",
             text: "SQLite is the canonical v1 storage backend, with synchronous FTS5 and derived embeddings.",
             kind: "decision",
-            project: Some(PROJECT),
         },
         Seed {
             key: "ann",
             text: "Start vector retrieval with exact cosine scanning and add ANN or HNSW only after profiling shows it is necessary.",
             kind: "decision",
-            project: Some(PROJECT),
         },
         Seed {
             key: "corrections",
             text: "Corrections are non-destructive: preserve the old memory as superseded and link it to the replacement with provenance.",
             kind: "procedure",
-            project: Some(PROJECT),
         },
         Seed {
             key: "episodes",
             text: "Episodic history is a searchable projection that keeps exact references back to the original session entries and tool evidence.",
             kind: "decision",
-            project: Some(PROJECT),
         },
         Seed {
             key: "indexing",
             text: "Canonical writes and FTS5 updates are synchronous; embedding generation is derived work that may run later without blocking the write.",
             kind: "procedure",
-            project: Some(PROJECT),
         },
         Seed {
             key: "tasks",
             text: "The task tracker remains separate from memory; memory may reference task IDs but must not depend on the task system.",
             kind: "constraint",
-            project: Some(PROJECT),
         },
         Seed {
             key: "stdio",
             text: "Use one-shot CLI operation first; add a warm stdio service only if profiling shows startup or model latency justifies it.",
             kind: "decision",
-            project: Some(PROJECT),
         },
         Seed {
             key: "authority",
             text: "User-authored memories and verified agent conclusions have different authority and evidence requirements.",
             kind: "constraint",
-            project: Some(PROJECT),
         },
         Seed {
             key: "freshness",
             text: "Coding memories backed by Git paths should eventually be checked for evidence freshness when those paths change.",
             kind: "procedure",
-            project: Some(PROJECT),
         },
         Seed {
             key: "confidence",
             text: "Do not reduce epistemic confidence merely because a memory has not been used recently; decay retrieval utility separately.",
             kind: "constraint",
-            project: None,
         },
         Seed {
             key: "compactness",
             text: "Prefer concise durable memory over large ambient context dumps that duplicate source material.",
             kind: "preference",
-            project: None,
-        },
-        Seed {
-            key: "other-project-distractor",
-            text: "A different project stores branch state in GitHub issues and uses HNSW for every memory query.",
-            kind: "fact",
-            project: Some("other-project"),
         },
     ]
 }
@@ -400,7 +355,7 @@ fn cases() -> Vec<Case<'static>> {
 }
 
 fn remember(db: &Path, seed: &Seed<'_>) -> Value {
-    let mut args = vec![
+    let args = [
         "remember".to_owned(),
         seed.text.to_owned(),
         "--kind".to_owned(),
@@ -410,11 +365,6 @@ fn remember(db: &Path, seed: &Seed<'_>) -> Value {
         "--source-ref".to_owned(),
         seed.key.to_owned(),
     ];
-    if let Some(project) = seed.project {
-        args.extend(["--project".to_owned(), project.to_owned()]);
-    } else {
-        args.push("--global".to_owned());
-    }
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
     run_json(db, &refs)
 }
@@ -428,8 +378,6 @@ fn context_ids_env(db: &Path, query: &str, lexical: bool, env: &[(&str, &str)]) 
     let args = vec![
         "context",
         query,
-        "--project",
-        PROJECT,
         "--workspace",
         WORKSPACE,
         "-n",
@@ -453,7 +401,7 @@ fn context_ids_env(db: &Path, query: &str, lexical: bool, env: &[(&str, &str)]) 
 
 fn lexical_ids(db: &Path, query: &str) -> Vec<String> {
     let limit = LIMIT.to_string();
-    let output = run_json(db, &["search", query, "--project", PROJECT, "-n", &limit]);
+    let output = run_json(db, &["search", query, "-n", &limit]);
     output
         .as_array()
         .expect("lexical search array")
@@ -463,18 +411,7 @@ fn lexical_ids(db: &Path, query: &str) -> Vec<String> {
 }
 fn semantic_ids(db: &Path, query: &str) -> Vec<String> {
     let limit = LIMIT.to_string();
-    let output = run_json(
-        db,
-        &[
-            "search",
-            query,
-            "--project",
-            PROJECT,
-            "--semantic",
-            "-n",
-            &limit,
-        ],
-    );
+    let output = run_json(db, &["search", query, "--semantic", "-n", &limit]);
     output
         .as_array()
         .expect("semantic search array")

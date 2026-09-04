@@ -5,20 +5,17 @@ use std::process::Command;
 use serde_json::Value;
 use uuid::Uuid;
 
-const PROJECT: &str = "real-corpus-eval";
 const WORKSPACE: &str = "main";
 const LIMIT: usize = 10;
 const RRF_K: f64 = 60.0;
 
 // Real durable statements promoted from the mem project's own `ai/` context
-// (brief/decisions/architecture), plus real cross-project distractors from
-// the central agent-context checkout. Queries are realistic agent questions
+// (brief/decisions/architecture), plus real Queries are realistic agent questions
 // about that knowledge and deliberately avoid seed phrasing.
 struct Seed<'a> {
     key: &'a str,
     text: &'a str,
     kind: &'a str,
-    project: Option<&'a str>,
 }
 
 struct Case<'a> {
@@ -81,10 +78,6 @@ fn compare_retrieval_on_real_corpus() {
         Some(seeds.len() as u64),
         "all seeded memories should be embedded: {index}"
     );
-
-    let distractor_id = ids
-        .get("other-project-distractor")
-        .expect("cross-project distractor ID");
     let mut lexical_metrics = Metrics::default();
     let mut semantic_metrics = Metrics::default();
     let mut equal_rrf_metrics = Metrics::default();
@@ -99,25 +92,11 @@ fn compare_retrieval_on_real_corpus() {
         let semantic = semantic_ids(&db, case.query);
         let context_default = context_ids(&db, case.query, false);
 
-        assert!(
-            !lexical.contains(distractor_id),
-            "lexical retrieval leaked cross-project memory"
-        );
-        assert!(
-            !semantic.contains(distractor_id),
-            "semantic retrieval leaked cross-project memory"
-        );
-
         let equal_rrf = rrf(&lexical, &semantic, LIMIT);
         let lexical_rank = rank_of(&lexical, expected);
         let semantic_rank = rank_of(&semantic, expected);
         let equal_rrf_rank = rank_of(&equal_rrf, expected);
         let context_default_rank = rank_of(&context_default, expected);
-
-        assert!(
-            !context_default.contains(distractor_id),
-            "default context ranking leaked cross-project memory"
-        );
 
         lexical_metrics.observe(lexical_rank);
         semantic_metrics.observe(semantic_rank);
@@ -150,103 +129,81 @@ fn corpus() -> Vec<Seed<'static>> {
             key: "package-naming",
             text: "The crates.io package is named mem-cli while the user-facing executable and repository are named mem, so registry aliases can differ from the installed command.",
             kind: "fact",
-            project: Some(PROJECT),
         },
         Seed {
             key: "toolchain",
             text: "Rust 1.98.0 is the pinned toolchain for this repository, and CI qualifies every change with rustfmt, tests, strict Clippy with -D warnings, and a release build.",
             kind: "constraint",
-            project: Some(PROJECT),
         },
         Seed {
             key: "memory-models",
             text: "Semantic memory, episodic history, and continuation state are distinct models: current durable knowledge, past-session evidence projections, and the compact workspace cursor must not be collapsed into one log or document corpus.",
             kind: "decision",
-            project: Some(PROJECT),
         },
         Seed {
             key: "provenance",
             text: "Every promoted semantic memory requires a provenance row, and later Git/path freshness checks should mark implementation memories suspect when their supporting evidence changes rather than deleting them.",
             kind: "constraint",
-            project: Some(PROJECT),
         },
         Seed {
             key: "fts-baseline",
             text: "FTS5 lexical search is the synchronous, always-available baseline; embeddings and vector retrieval are derived enhancements that must never become correctness dependencies.",
             kind: "decision",
-            project: Some(PROJECT),
         },
         Seed {
             key: "queue-fencing",
             text: "Derived embedding work is claimed with a generation, opaque lease token, and expiry; stale generations or tokens cannot complete newer work, and expired running leases can be reclaimed by another worker.",
             kind: "decision",
-            project: Some(PROJECT),
         },
         Seed {
             key: "episode-ownership",
             text: "An episode is uniquely owned by its source type and source reference; re-recording an existing source entry refreshes the projection instead of duplicating it.",
             kind: "decision",
-            project: Some(PROJECT),
         },
         Seed {
             key: "semantic-only-wins",
             text: "On the first synthetic retrieval evaluation, exact semantic search beat the lexical OR baseline on hit@1 and MRR, but equal-weight RRF hybrid ranking demoted several semantic-only wins and reduced per-case quality on those queries.",
             kind: "fact",
-            project: Some(PROJECT),
         },
         Seed {
             key: "oneshot-latency",
             text: "Measured one-shot semantic query latency is about 0.10 seconds per query, so a persistent serve --stdio daemon is not justified and one-shot CLI execution stays the default.",
             kind: "decision",
-            project: Some(PROJECT),
         },
         Seed {
             key: "no-llm-extraction",
             text: "Do not automatically promote every conversation turn into semantic memory; initial durable writes are explicit, and any later automatic extraction must produce candidates that pass dedupe and validation before promotion.",
             kind: "constraint",
-            project: Some(PROJECT),
         },
         Seed {
             key: "no-storage-abstraction",
             text: "Do not introduce a generic storage-backend abstraction before a real second backend exists; keep SQLite-specific code isolated instead.",
             kind: "constraint",
-            project: Some(PROJECT),
         },
         Seed {
             key: "correct-supersession",
             text: "Correcting a memory marks the predecessor superseded and links it to the replacement in the same SQLite transaction, preserving the old record and its evidence instead of destructively overwriting.",
             kind: "procedure",
-            project: Some(PROJECT),
         },
         Seed {
             key: "workspace-scoping",
             text: "Continuation state is keyed by project and workspace so separate branches and worktrees keep independent resume points while sharing project-scoped semantic memory.",
             kind: "decision",
-            project: Some(PROJECT),
         },
         Seed {
             key: "compactness",
             text: "Prefer concise durable memory over large ambient context dumps that duplicate source material the agent can re-read.",
             kind: "preference",
-            project: None,
         },
         Seed {
             key: "confidence-decay",
             text: "Epistemic confidence of a memory must not decay merely because it has not been retrieved recently; retrieval utility and truth are separate concerns.",
             kind: "constraint",
-            project: None,
-        },
-        Seed {
-            key: "other-project-distractor",
-            text: "The sy sync tool preserves setuid and setgid bits by masking received modes, and its SSH tests must run single-threaded because of shared remote state.",
-            kind: "fact",
-            project: Some("other-project"),
         },
         Seed {
             key: "other-project-distractor-2",
             text: "Every destination write in the sy sync engine uses an atomic temp-file-and-rename so an interrupted sync never leaves a partial file at the target.",
             kind: "constraint",
-            project: Some("other-project"),
         },
     ]
 }
@@ -317,41 +274,35 @@ fn cases() -> Vec<Case<'static>> {
 }
 
 fn remember(db: &Path, seed: &Seed<'_>) -> Value {
-    let mut args = vec![
-        "remember".to_owned(),
-        seed.text.to_owned(),
-        "--kind".to_owned(),
-        seed.kind.to_owned(),
-        "--source-type".to_owned(),
-        "retrieval-eval".to_owned(),
-        "--source-ref".to_owned(),
-        seed.key.to_owned(),
-    ];
-    if let Some(project) = seed.project {
-        args.extend(["--project".to_owned(), project.to_owned()]);
-    } else {
-        args.push("--global".to_owned());
-    }
-    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    run_json(db, &refs)
+    run_json(db, &["remember", seed.text, "--kind", seed.kind])
 }
 
-fn context_ids(db: &Path, query: &str, lexical: bool) -> Vec<String> {
+fn lexical_ids(db: &Path, query: &str) -> Vec<String> {
     let limit = LIMIT.to_string();
-    let args = vec![
-        "context",
-        query,
-        "--project",
-        PROJECT,
-        "--workspace",
-        WORKSPACE,
-        "-n",
-        limit.as_str(),
-    ];
+    let output = run_json(db, &["search", query, "-n", &limit]);
+    output
+        .as_array()
+        .expect("lexical search array")
+        .iter()
+        .map(|item| item["memory"]["id"].as_str().expect("id").to_owned())
+        .collect()
+}
+fn context_ids(db: &Path, query: &str, lexical: bool) -> Vec<String> {
     if lexical {
         return lexical_ids(db, query);
     }
-    run_json(db, &args)["memories"]
+    let limit = LIMIT.to_string();
+    run_json(
+        db,
+        &[
+            "context",
+            query,
+            "--workspace",
+            WORKSPACE,
+            "-n",
+            limit.as_str(),
+        ],
+    )["memories"]
         .as_array()
         .expect("context memories array")
         .iter()
@@ -363,31 +314,9 @@ fn context_ids(db: &Path, query: &str, lexical: bool) -> Vec<String> {
         })
         .collect()
 }
-
-fn lexical_ids(db: &Path, query: &str) -> Vec<String> {
-    let limit = LIMIT.to_string();
-    let output = run_json(db, &["search", query, "--project", PROJECT, "-n", &limit]);
-    output
-        .as_array()
-        .expect("lexical search array")
-        .iter()
-        .map(|item| item["memory"]["id"].as_str().expect("id").to_owned())
-        .collect()
-}
 fn semantic_ids(db: &Path, query: &str) -> Vec<String> {
     let limit = LIMIT.to_string();
-    let output = run_json(
-        db,
-        &[
-            "search",
-            query,
-            "--project",
-            PROJECT,
-            "--semantic",
-            "-n",
-            &limit,
-        ],
-    );
+    let output = run_json(db, &["search", query, "--semantic", "-n", &limit]);
     output
         .as_array()
         .expect("semantic search array")
