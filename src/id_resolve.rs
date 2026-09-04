@@ -1,14 +1,7 @@
-//! Shared exact-ID-or-prefix resolution and FTS query construction.
-//!
-//! Memory ID prefix resolution and FTS query construction share the same
-//! literal-prefix escaping rules.
-
 use anyhow::{Result, bail};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{OptionalExtension, params};
 
-/// Escape SQL LIKE wildcards (`_`, `%`, and the escape character itself)
-/// so an ID-prefix candidate matches literally instead of any character.
-fn escape_like_for_prefix(input: &str) -> String {
+fn escape_like_prefix(input: &str) -> String {
     let mut escaped = String::with_capacity(input.len());
     for character in input.chars() {
         if matches!(character, '_' | '%' | '\\') {
@@ -18,63 +11,7 @@ fn escape_like_for_prefix(input: &str) -> String {
     }
     escaped
 }
-/// Candidate IDs matching an exact ID or a prefix of one, exact matches
-/// first, at most `limit` rows. Used by routed resolution, which must see
-/// every store's matches to enforce cross-store uniqueness.
-fn id_candidates(
-    connection: &Connection,
-    table: &str,
-    id_or_prefix: &str,
-    limit: usize,
-) -> Result<Vec<String>> {
-    let candidate = id_or_prefix.trim();
-    let prefix = format!("{}%", escape_like_for_prefix(candidate));
-    let sql = format!(
-        "SELECT id FROM {table}\n\
-         WHERE id = ?1 OR id LIKE ?2 ESCAPE '\\'\n\
-         ORDER BY CASE WHEN id = ?1 THEN 0 ELSE 1 END, id\n\
-         LIMIT ?3"
-    );
-    let mut statement = connection.prepare(&sql)?;
-    let rows = statement.query_map(params![candidate, prefix, limit as i64], |row| {
-        row.get::<_, String>(0)
-    })?;
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-}
 
-/// Resolve an exact ID or an unambiguous prefix within one store. An exact
-/// ID always wins, even when it is also a prefix of other IDs.
-fn resolve_id(
-    connection: &Connection,
-    table: &str,
-    kind: &str,
-    id_or_prefix: &str,
-) -> Result<String> {
-    let candidate = id_or_prefix.trim();
-    if candidate.is_empty() {
-        bail!("{kind} ID cannot be empty");
-    }
-    if let Some(id) = connection
-        .query_row(
-            &format!("SELECT id FROM {table} WHERE id = ?1"),
-            [candidate],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?
-    {
-        return Ok(id);
-    }
-    let ids = id_candidates(connection, table, candidate, 2)?;
-    match ids.as_slice() {
-        [] => bail!("{kind} not found: {candidate}"),
-        [id] => Ok(id.clone()),
-        _ => bail!("ambiguous {kind} ID prefix: {candidate}"),
-    }
-}
-
-/// Build an FTS5 query string joining each whitespace-separated term as a
-/// quoted phrase with OR, so partial-term matches stay ranked-visible
-/// instead of being AND-filtered out of existence.
 pub(crate) fn fts_query(input: &str) -> Result<String> {
     let terms: Vec<String> = input
         .split_whitespace()
@@ -86,73 +23,77 @@ pub(crate) fn fts_query(input: &str) -> Result<String> {
     Ok(terms.join(" OR "))
 }
 
-impl super::store::Store {
-    /// Memory IDs matching an exact ID or prefix, for routed resolution.
-    pub fn memory_id_candidates(&self, id_or_prefix: &str) -> Result<Vec<String>> {
-        id_candidates(&self.connection, "memories", id_or_prefix, 3)
-    }
-
+impl crate::store::Store {
     pub(crate) fn resolve_memory_id(&self, id_or_prefix: &str) -> Result<String> {
-        resolve_id(&self.connection, "memories", "memory", id_or_prefix)
+        let candidate = id_or_prefix.trim();
+        if candidate.is_empty() {
+            bail!("memory ID cannot be empty");
+        }
+        if let Some(id) = self
+            .connection
+            .query_row(
+                "SELECT id FROM memories WHERE id = ?1",
+                [candidate],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        {
+            return Ok(id);
+        }
+
+        let prefix = format!("{}%", escape_like_prefix(candidate));
+        let mut statement = self.connection.prepare(
+            "SELECT id FROM memories\n\
+             WHERE id LIKE ?1 ESCAPE '\\'\n\
+             ORDER BY id\n\
+             LIMIT 2",
+        )?;
+        let ids = statement
+            .query_map(params![prefix], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        match ids.as_slice() {
+            [] => bail!("memory not found: {candidate}"),
+            [id] => Ok(id.clone()),
+            _ => bail!("ambiguous memory ID prefix: {candidate}"),
+        }
     }
 }
+
 #[cfg(test)]
 mod tests {
-    use super::super::store::Store;
+    use crate::store::{NewMemory, Store};
 
     fn test_path() -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
-            "mem-id-resolve-{}-{}.db",
-            std::process::id(),
-            uuid::Uuid::now_v7()
-        ))
+        std::env::temp_dir().join(format!("mem-id-test-{}.db", uuid::Uuid::now_v7()))
     }
 
-    #[test]
-    fn wildcards_in_memory_prefixes_match_literally() {
-        // SQL LIKE wildcard characters in an ID candidate must match literally.
-        let path = test_path();
-        let mut store = Store::open(&path).expect("open store");
+    fn remember(store: &Store) -> crate::store::Memory {
         store
-            .remember(super::super::store::NewMemory {
+            .remember(NewMemory {
                 text: "literal wildcard memory".to_owned(),
                 kind: "fact".to_owned(),
-                project_id: None,
                 actor: "agent".to_owned(),
                 source_type: "test".to_owned(),
                 source_ref: None,
             })
-            .expect("seed memory");
-
-        for wildcard in ["_", "%", "\\".to_string().as_str()] {
-            assert!(
-                store.get(wildcard).is_err(),
-                "memory wildcard {wildcard:?} must not resolve"
-            );
-        }
-        // Sanity: a real full-ID prefix still resolves.
-        let memory_id = store.memory_id_candidates("01").expect("memory candidates");
-        assert!(!memory_id.is_empty(), "real prefix must match");
-
-        let _ = std::fs::remove_file(&path);
+            .expect("remember")
     }
 
     #[test]
-    fn exact_id_wins_over_ambiguity() {
+    fn wildcard_characters_are_literal_in_prefixes() {
         let path = test_path();
-        let mut store = Store::open(&path).expect("open store");
-        let memory = store
-            .remember(super::super::store::NewMemory {
-                text: "exact id wins".to_owned(),
-                kind: "fact".to_owned(),
-                project_id: None,
-                actor: "agent".to_owned(),
-                source_type: "test".to_owned(),
-                source_ref: None,
-            })
-            .expect("seed memory");
-        // The memory's own ID is trivially its exact match.
-        assert!(store.resolve_memory_id(&memory.id).is_ok());
-        let _ = std::fs::remove_file(&path);
+        let store = Store::open(&path).expect("open");
+        let memory = remember(&store);
+        for wildcard in ["_", "%", "\\"] {
+            assert!(store.get(wildcard).is_err());
+        }
+        assert_eq!(
+            store
+                .get(&memory.id[..8])
+                .expect("resolve prefix")
+                .id,
+            memory.id
+        );
+        let _ = std::fs::remove_file(path);
     }
 }
