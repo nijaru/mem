@@ -101,6 +101,13 @@ jobs:
           )
           path.write_text(text)
 
+          path = Path('src/index_job.rs')
+          text = path.read_text().replace(
+              'assert_eq!(store.stats().expect("read store stats").schema_version, 5);',
+              'assert_eq!(store.stats().expect("read store stats").schema_version, 6);',
+          )
+          path.write_text(text)
+
           path = Path('src/main.rs')
           text = path.read_text()
           text, n = re.subn(
@@ -116,6 +123,20 @@ jobs:
               path = Path(filename)
               text = path.read_text().replace('Some(PROJECT)', 'None')
               path.write_text(text)
+
+          path = Path('tests/real_corpus_eval.rs')
+          text = path.read_text()
+          text, n = re.subn(
+              r'fn remember\(db: &Path, seed: &Seed<\'_>\) -> Value \{.*?\n\}',
+              '''fn remember(db: &Path, seed: &Seed<'_>) -> Value {
+                  run_json(db, &["remember", seed.text, "--kind", seed.kind])
+              }'''.replace('\n              ', '\n'),
+              text,
+              count=1,
+              flags=re.S,
+          )
+          assert n == 1, 'real corpus remember helper missing'
+          path.write_text(text)
 
           path = Path('tests/retrieval_eval.rs')
           text = path.read_text()
