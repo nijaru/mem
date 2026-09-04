@@ -10,13 +10,15 @@ on:
       - tests/real_corpus_eval.rs
       - tests/heldout_eval.rs
       - Cargo.toml
+      - migrations/schema.sql
+      - migrations/0007_lean_core.sql
       - src/embedding.rs
       - src/embedding_worker.rs
       - src/id_resolve.rs
       - src/main.rs
       - src/store.rs
-      - src/storage.rs
       - src/vector_search.rs
+      - src/workspace.rs
 
 permissions:
   contents: read
