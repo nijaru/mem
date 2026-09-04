@@ -1,5 +1,3 @@
-BEGIN IMMEDIATE;
-
 DROP TRIGGER IF EXISTS memories_fts_insert;
 DROP TRIGGER IF EXISTS memories_fts_delete;
 DROP TRIGGER IF EXISTS memories_fts_update;
@@ -158,4 +156,3 @@ BEGIN
 END;
 
 PRAGMA user_version = 7;
-COMMIT;
