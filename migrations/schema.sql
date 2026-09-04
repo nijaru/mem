@@ -1,5 +1,3 @@
-BEGIN IMMEDIATE;
-
 CREATE TABLE memories (
     id TEXT PRIMARY KEY NOT NULL,
     kind TEXT NOT NULL,
@@ -68,4 +66,3 @@ BEGIN
 END;
 
 PRAGMA user_version = 7;
-COMMIT;
