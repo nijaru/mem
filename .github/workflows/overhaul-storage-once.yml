@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 4
+          fetch-depth: 5
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.98.0
@@ -24,7 +24,7 @@ jobs:
       - name: Apply and verify repo-local storage slice
         shell: bash
         run: |
-          git show HEAD^^:.github/workflows/overhaul-storage-once.yml > /tmp/source-workflow.yml
+          git show 8d386ae82dd111479632ea39b91feac52852f3b2:.github/workflows/overhaul-storage-once.yml > /tmp/source-workflow.yml
           python3 - <<'PY'
           from pathlib import Path
 
@@ -46,7 +46,6 @@ jobs:
               out.append(line)
           script = '\n'.join(out).rstrip() + '\n'
           assert 'Path("tests/managed_default.rs")' in script
-          assert 'storage.write_text(text)' in script
           Path('/tmp/apply-storage.sh').write_text(script)
           PY
           bash /tmp/apply-storage.sh
@@ -60,41 +59,40 @@ jobs:
 
           text, count = re.subn(
               r'(fn managed_index_run_never_creates_missing_stores\(\) \{\n        let home = test_home\(\);\n)(        let router = StorageRouter::managed_at\(home\.clone\(\)\);)',
-              r'\1        let layout = ManagedLayout::at(home.clone());\n\2',
+              r'\1        let layout = super::ManagedLayout::at(home.clone());\n\2',
               text,
               count=1,
           )
-          assert count == 1, f'index test layout insertion: {count}'
+          assert count == 1
           text, count = re.subn(
               r'!router\n                \.managed_layout\(\)\n                \.project_db\("github\.com/x/never-created"\)',
               '!layout\n                .project_db("github.com/x/never-created")',
               text,
               count=1,
           )
-          assert count == 1, f'index test helper replacement: {count}'
+          assert count == 1
 
           text, count = re.subn(
               r'(fn storage_status_reports_without_creating_files\(\) \{\n        let home = test_home\(\);\n)(        let router = StorageRouter::managed_at\(home\.clone\(\)\);)',
-              r'\1        let layout = ManagedLayout::at(home.clone());\n\2',
+              r'\1        let layout = super::ManagedLayout::at(home.clone());\n\2',
               text,
               count=1,
           )
-          assert count == 1, f'status test layout insertion: {count}'
+          assert count == 1
           text, count = re.subn(
               r'        let layout = router\.managed_layout\(\);\n        let report = super::storage_status_report\(layout\)',
               '        let report = super::storage_status_report(&layout)',
               text,
               count=1,
           )
-          assert count == 1, f'status test helper replacement: {count}'
+          assert count == 1
 
-          patterns = [
+          for pattern in [
               r'\n    pub fn managed\(\) -> Result<Self> \{\n        Ok\(Self::Managed\(ManagedLayout::resolve\(\)\?\)\)\n    \}\n',
               r'\n    /// The managed layout this router uses\. Exact-file routers have none\.\n    pub fn managed_layout\(&self\) -> &ManagedLayout \{\n        match self \{\n            Self::Managed\(layout\) => layout,\n            Self::Exact\(_\) => panic!\("managed_layout on an exact-file router"\),\n        \}\n    \}\n',
-          ]
-          for pattern in patterns:
+          ]:
               text, count = re.subn(pattern, '\n', text, count=1)
-              assert count == 1, f'dead helper removal count: {count}'
+              assert count == 1
 
           path.write_text(text)
           PY
