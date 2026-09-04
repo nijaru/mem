@@ -56,6 +56,22 @@ jobs:
           assert old in text, "remember branch matcher not found"
           text = text.replace(old, new, 1)
 
+          start = text.index("text = re.sub(r'\\n\\s*// Hard negatives: same vocabulary family, wrong project")
+          end = text.index("text = text.replace('    assert!(leakage_failures.is_empty()", start)
+          safe = (
+              "hard_negative_block = (\n"
+              "    '        // Hard negatives: same vocabulary family, wrong project.\\n'\n"
+              "    '        for (key, id) in &ids {\\n'\n"
+              "    '            if is_hard_negative(case.key, key) && semantic.contains(id) {\\n'\n"
+              "    '                leakage_failures.push(format!(\\\"{} leaked {}\\\", case.key, key));\\n'\n"
+              "    '            }\\n'\n"
+              "    '        }\\n\\n'\n"
+              ")\n"
+              "assert hard_negative_block in text, 'heldout hard-negative loop not found'\n"
+              "text = text.replace(hard_negative_block, '', 1)\n"
+          )
+          text = text[:start] + safe + text[end:]
+
           path.write_text(text)
           PY
 
