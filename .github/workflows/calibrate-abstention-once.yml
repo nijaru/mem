@@ -1,0 +1,101 @@
+name: calibrate-abstention-once
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/calibrate-abstention-once.yml
+
+permissions:
+  contents: write
+
+jobs:
+  calibrate:
+    runs-on: ubuntu-22.04
+    env:
+      MEM_MODEL_CACHE: ${{ github.workspace }}/.model-cache
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/cache@v4
+        with:
+          path: .model-cache
+          key: fastembed-5.3.0-bge-small-en-v1.5-q-${{ runner.os }}-${{ runner.arch }}
+      - name: Build and calibrate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release
+          python3 - <<'PY'
+          import ast, json, os, re, subprocess, tempfile
+          from pathlib import Path
+
+          src = Path('tests/real_corpus_eval.rs').read_text()
+          seed_re = re.compile(r'Seed\s*\{\s*key:\s*"([^"]+)",\s*text:\s*"((?:[^"\\]|\\.)*)",\s*kind:\s*"([^"]+)"', re.S)
+          case_re = re.compile(r'Case\s*\{\s*key:\s*"([^"]+)",\s*query:\s*"((?:[^"\\]|\\.)*)"', re.S)
+          seeds = [(k, ast.literal_eval('"'+t+'"'), kind) for k,t,kind in seed_re.findall(src)]
+          cases = [(k, ast.literal_eval('"'+q+'"')) for k,q in case_re.findall(src)]
+          assert seeds and cases, (len(seeds), len(cases))
+          text_by_key = {k:t for k,t,_ in seeds}
+
+          db = Path(tempfile.gettempdir()) / 'mem-abstention-calibration.db'
+          for suffix in ['', '-wal', '-shm']:
+              try: Path(str(db)+suffix).unlink()
+              except FileNotFoundError: pass
+
+          def run(args):
+              env = os.environ.copy()
+              p = subprocess.run(['target/release/mem','--json','--db',str(db),*args], env=env, text=True, capture_output=True, check=True)
+              return json.loads(p.stdout)
+
+          for key,text,kind in seeds:
+              run(['remember', text, '--kind', kind, '--project', 'real-corpus-eval', '--source-type', 'eval'])
+          idx = run(['index','run','-n','128'])
+          assert idx['committed'] == len(seeds), idx
+
+          positives=[]
+          for key,q in cases:
+              hits=run(['search',q,'--semantic','--project','real-corpus-eval','-n','10'])
+              expected=text_by_key[key]
+              hit=next((h for h in hits if h['memory']['text']==expected), None)
+              assert hit is not None, (key,q)
+              positives.append((key,hit['score'],hits[0]['score']))
+
+          negatives=[
+              'best recipe for sourdough bread hydration and baking temperature',
+              'who won the 1998 world cup final and what was the score',
+              'how should i prune a mature lemon tree in winter',
+              'compare hotel neighborhoods for a weekend trip to lisbon',
+              'what chord progression works for a sad jazz ballad in e flat minor',
+              'symptoms of a failing alternator in a 2012 honda civic',
+              'explain photosynthesis to a fifth grade student',
+              'which trail running shoes are best for rocky terrain',
+          ]
+          negative_scores=[]
+          for q in negatives:
+              hits=run(['search',q,'--semantic','--project','real-corpus-eval','-n','3'])
+              negative_scores.append((q,hits[0]['score'] if hits else None))
+
+          print('POSITIVE expected-score / top-score')
+          for row in positives: print(row)
+          print('NEGATIVE top-score')
+          for row in negative_scores: print(row)
+          ps=[x[1] for x in positives]
+          ns=[x[1] for x in negative_scores if x[1] is not None]
+          print(json.dumps({
+              'positive_min': min(ps), 'positive_median': sorted(ps)[len(ps)//2], 'positive_max': max(ps),
+              'negative_min': min(ns), 'negative_median': sorted(ns)[len(ns)//2], 'negative_max': max(ns),
+          }, sort_keys=True))
+          PY
+      - name: Remove calibration workflow
+        if: always()
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/calibrate-abstention-once.yml
+          git commit -m "chore: remove abstention calibration workflow"
+          git push origin HEAD:main
