@@ -22,19 +22,12 @@ jobs:
           toolchain: 1.98.0
           components: rustfmt
       - uses: Swatinem/rust-cache@v2
-      - name: Apply migration locking
+      - name: Serialize schema migration
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-
-          for filename in ['migrations/schema.sql', 'migrations/0007_lean_core.sql']:
-              path = Path(filename)
-              text = path.read_text()
-              assert text.startswith('BEGIN IMMEDIATE;\n\n'), filename
-              assert text.endswith('COMMIT;\n'), filename
-              path.write_text(text[len('BEGIN IMMEDIATE;\n\n'):-len('COMMIT;\n')])
 
           path = Path('src/store.rs')
           text = path.read_text()
