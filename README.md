@@ -1,254 +1,79 @@
 # mem
 
-`mem` is a local memory CLI for agents and coding workflows.
+`mem` is a small repo-local memory CLI for coding agents. It preserves durable project knowledge after it falls out of the current context window.
 
-It provides a small durable substrate for three different kinds of agent context:
+## Core model
 
-- **semantic memory** — durable facts, decisions, constraints, preferences, and procedures;
-- **episodic history** — searchable projections of past sessions with exact source backreferences;
-- **continuation state** — compact per-workspace state describing where work should resume.
+Each project owns one SQLite database at `.mem/mem.db`. Memories are concise durable facts, findings, decisions, constraints, preferences, and procedures. Each memory carries lightweight provenance (`actor`, `source_type`, and optional `source_ref`). Corrections preserve the old record as `superseded` and point it at the replacement.
 
-`mem` is agent-runtime agnostic. The Rust CLI owns persistence, retrieval, project/workspace identity, and memory semantics without depending on a runtime adapter.
+Continuation state is separate: one compact resume cursor per workspace, normally the current Git branch or detached commit.
 
-## Features
-
-- Single local SQLite database with bundled SQLite and FTS5.
-- Project-scoped memory derived automatically from Git remotes.
-- Separate branch/worktree continuation state.
-- Global memory for user-wide preferences and facts.
-- Provenance attached to semantic memories.
-- Non-destructive correction and supersession.
-- Source-backed episodic history with exact session/entry references.
-- Machine-readable JSON output for agent integrations.
-- No daemon required for normal operation.
-
-## Installation
-
-`mem` currently requires Rust 1.98 or newer.
+## Install
 
 ```bash
 cargo install --path .
 ```
 
-The crates.io package name is `mem-cli`; the installed executable is `mem`.
+The crates.io package is `mem-cli`; the executable is `mem`. Rust 1.98 or newer is required.
 
-For development:
-
-```bash
-cargo build
-cargo test --all-targets
-cargo clippy --all-targets -- -D warnings
-```
-
-## Quick start
-
-Initialize or inspect the local store:
+## Commands
 
 ```bash
 mem init
 mem status
-```
 
-Inside a Git repository, project scope is detected automatically:
+mem remember "Use release/acquire ordering for publication" \
+  --kind decision --source-type git --source-ref abc123
 
-```bash
-mem project
-```
-
-Store a durable project memory:
-
-```bash
-mem remember "Publication uses release/acquire ordering" \
-  --kind decision \
-  --source-type git \
-  --source-ref abc123
-```
-
-Store a user-wide memory instead:
-
-```bash
-mem remember "Prefer concise command output" \
-  --kind preference \
-  --global
-```
-
-Search semantic memory:
-
-```bash
+mem context "publication handoff"
 mem search "publication ordering"
-```
+mem search "how do readers observe a published value" --semantic
 
-Correct a memory without destroying the previous record:
-
-```bash
-mem correct <id-or-prefix> "Publication uses release/acquire ordering" \
-  --source-type git \
-  --source-ref def456
-```
-
-Read a memory together with its provenance and relations:
-
-```bash
 mem get <id-or-prefix>
-```
-
-Soft-delete it from active retrieval:
-
-```bash
+mem correct <id-or-prefix> "Use release/acquire ordering on the publication path"
 mem forget <id-or-prefix>
-```
-
-## Continuation state
-
-Continuation state is keyed by project and workspace rather than shared across every branch:
-
-```bash
-mem state set \
-  --session session-123 \
-  --goal "qualify publication path" \
-  --checkpoint "Loom is green; release build remains"
 
 mem state show
+mem state set --goal "qualify publication path" --checkpoint "loom is green"
+mem state set --session session-123 --clear checkpoint
 mem state clear
+
+mem index
+mem index --cached-only
 ```
 
-`state set` replaces the whole row; `state patch` updates only the provided fields atomically, so adapters never need read-merge-write (which races concurrent writers) and never wipe fields they did not read:
+`remember` and `state set` initialize the repo-local store automatically; `init` is the explicit setup command. `.mem/` is ignored by Git by default. `--db /path/to/file.db` and `MEM_DB` pin an exact database for tests or isolated profiles.
+
+## Retrieval
+
+FTS5 lexical search is synchronous and always available. `mem context` is the agent-facing retrieval path: when every active memory has a current embedding and the model is already cached, it uses semantic ranking; otherwise it falls back to lexical recall so incomplete derived state never hides canonical memories.
+
+`mem search --semantic` is an explicit semantic-search tool. It requires complete current-model coverage and tells you to run `mem index` when coverage is incomplete. Semantic search uses exact cosine scoring; the expected local corpus is small enough that an ANN index would add complexity without demonstrated value.
+
+Context is bounded by count and by memory-text bytes (`--max-bytes`, default 32768) to keep recalled context compact. Low-relevance semantic context is allowed to return no memories.
+
+## Embeddings
+
+Embeddings are rebuildable derived data. `mem index` directly selects active memories missing a vector for the current model, embeds a bounded batch, and commits each vector only if the memory is still active at the exact source version that was embedded. Failed work remains missing and a later `mem index` retries it naturally.
+
+`mem index --cached-only` never downloads the model, which makes it safe for opportunistic agent hooks.
+
+## Storage and safety
+
+SQLite with bundled FTS5 is canonical. Normal storage is physically isolated per project; there is no automatic cross-project recall. Reads do not create missing stores. Created database files and SQLite sidecars are private to the current user on Unix.
+
+`mem` is runtime-agnostic and requires no daemon. Task tracking, hosted sync, and transcript archives stay outside the memory core.
+
+## Development
 
 ```bash
-mem state patch --checkpoint "Loom is green; release build remains"
-mem state patch --clear goal
+cargo fmt --all -- --check
+cargo test --all-targets
+cargo clippy --all-targets -- -D warnings
+cargo build --release
 ```
 
-This keeps durable project knowledge shared while allowing independent branches or worktrees to resume different work safely.
-
-## Agent context
-
-`mem context` is the primary adapter-facing read operation. It combines current workspace continuation state with broadly recalled semantic memory and provenance:
-
-```bash
-mem context "publication handoff"
-```
-
-Use `--json` for machine-readable output:
-
-```bash
-mem --json context "publication handoff"
-```
-
-Recall is byte-bounded as well as count-bounded: `--max-bytes` (default 32768, `0` disables) stops recall at the first hit whose memory text would push the total past the budget, in rank order. The top-ranked hit is always included when any budget allows it, so a query matching one oversized memory still surfaces that match instead of nothing.
-
-## Episodic history
-
-Episodes index an original session or event stream without replacing that source as the authoritative transcript.
-
-```bash
-mem episode create session-123 --source-type transcript
-
-mem episode record <episode-id> message-42 \
-  "Publication handoff succeeded" \
-  --kind message \
-  --role assistant
-
-mem episode end <episode-id>
-mem episode get <episode-id>
-```
-
-Search indexed history:
-
-```bash
-mem history "publication handoff"
-```
-
-History hits retain both the episode-level source reference and the exact source-local entry reference so integrations can expand a result back into the original evidence.
-
-History search is lexical (FTS5) only. Episode entries are never embedded: no reader consumes episode-entry vectors yet, so maintaining them would spend model time and database space on derived data with no consumer. Embedding work covers semantic memories only.
-
-## Project and workspace identity
-
-When run inside Git, `mem` derives the project identity from the canonicalized `origin` remote where possible. Common SSH and HTTPS forms normalize to identities such as:
-
-```text
-github.com/nijaru/mem
-```
-
-Without an origin remote, `mem` falls back to a local repository-root identity.
-
-Workspace identity is separate:
-
-- attached branch: `branch:<name>`
-- detached HEAD: `detached:<short-sha>`
-
-Supported commands can override automatic detection with `--project` and `--workspace`. `--global` selects user-wide/unscoped behavior where applicable.
-
-## Retrieval semantics
-
-Semantic search uses SQLite FTS5 immediately; no external service or model is required.
-
-Choosing a tier: lexical (`mem search`) is for keyword hunts — it ranks bm25 over quoted terms, so it favors exact vocabulary. `--semantic` is for concept hunts — it finds meaning matches that share no query terms at all. If you know the words that appeared in the memory, use lexical; if you are describing the idea, use semantic.
-
-- `mem search` uses bm25-ranked lexical matching: results matching more query terms rank higher, and partial matches stay visible instead of being discarded.
-- `mem context` ranks semantically when the local embedding model is already cached and every active memory visible in the query scope has a current-model vector, and falls back to broader lexical `OR` recall otherwise. `--lexical` forces the lexical baseline.
-- superseded and deleted memories remain in canonical storage but are excluded from active retrieval.
-
-Vector retrieval is derived from the canonical SQLite data and is not required for correctness. Incomplete embedding coverage (for example, a just-remembered memory whose indexing job is still queued) makes `mem context` use lexical recall so no active memory can disappear. `mem context` never downloads the embedding model; run `mem index run` (or an explicit `mem search --semantic`) once to populate the local model cache and vectors. Embedding jobs whose canonical source lost its production-model vector (for example after a model change) are rediscovered by `mem index run`. `mem index run --cached-only` does nothing when the model is not already cached, so adapters can schedule indexing without risking a download. In the managed layout, `mem index run` covers the current project database plus the user database; `mem index run --all` also covers every other existing managed project database.
-
-## Data location
-
-By default, `mem` uses a managed per-project/user layout under the platform-local application data directory in a `mem` subdirectory:
-
-```text
-<managed root>/
-  layout-v1/
-    user.db                      global memories, global episodes
-    projects/<encoded id>/mem.db one database per project
-```
-
-Overrides:
-
-- `MEM_DB=/path/to/memory.db` selects an exact single database path for every operation (the bypass used by tests and isolated profiles).
-- `--db /path/to/memory.db` overrides the database for one command.
-- `MEM_HOME=/path/to/dir` moves the managed root (layout, and any legacy `memory.db` pending migration) to that directory.
-
-Reads never create missing databases; writes create exactly the one database a row belongs in.
-
-Created layout directories and store files are private to the current user (`0700` directories, `0600` databases and sidecars); memory text often holds credentials and internal paths, so a shared machine cannot read another user's agent memory. Existing files are never re-permissioned. Recall merges project and user stores under a complete-coverage semantic gate with a deterministic lexical fallback; `history` stays single-store by design.
-
-### Legacy single file
-
-Earlier versions stored everything in one `<managed root>/memory.db`. When that file exists without an active `layout-v1`, storage-touching commands refuse with guidance instead of silently splitting usage; run:
-
-```text
-mem storage status
-mem storage migrate
-```
-
-Migration builds and verifies the full layout in a hidden staging directory and activates it with one atomic directory rename; the legacy file is left untouched for rollback. Re-running against an active layout is a no-op. `mem storage purge --project <id>` deletes exactly that project's managed database and SQLite sidecars after confirmation (`--yes` to skip).
-
-### Managed layout (in progress)
-
-A per-project/user managed layout (`layout-v1/` with `user.db` and `projects/<encoded>/mem.db`) is being rolled out in slices. `mem storage status` reports the managed-layout inventory (layout version and paths, legacy `memory.db` presence, per-store schema/counts/queue state, migration-needed state) without creating any files. Managed `index run` covers the current project database plus the user database; `index run --all` additionally covers every existing managed project database. The low-level worker protocol (`index claim|commit|complete|retry`) is pinned to one exact database. The remaining rollout item is dogfooding the managed default; the storage layout itself is complete: scoped routing, index routing, staged migration, and purge are all active.
-
-## Memory model
-
-Current semantic memory kinds are:
-
-- `fact`
-- `decision`
-- `constraint`
-- `preference`
-- `procedure`
-
-A semantic memory is either global or project-scoped and has one of three statuses: `active`, `superseded`, or `deleted`.
-
-Corrections create a replacement record in the same scope, attach fresh provenance, mark the old memory `superseded`, and retain an explicit `superseded_by` relation. The previous evidence remains inspectable instead of being overwritten.
-
-### Provenance is descriptive, not authority
-
-Every memory records `actor` and `source_type`/`source_ref` provenance. These describe where a memory came from for audit and inspection — they are not authentication. A memory saying it came from a human, a specific agent, or a trusted tool has no more authority than any other memory: retrieval rank never upgrades it, nothing auto-promotes based on it, and adapters should treat recalled memory as supporting context, not instructions. A same-user CLI cannot authenticate "human vs model" from flags alone, so `mem` deliberately makes no authority claims on that basis.
-
-## Status
-
-`mem` is pre-1.0 and under active development. The local semantic-memory, continuation-state, episodic-history, and lexical retrieval core is usable today; interfaces may still evolve before the first stable release.
+`mem` is pre-1.0 and its interfaces may still change while the core is dogfooded.
 
 ## License
 
