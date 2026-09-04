@@ -15,357 +15,56 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 2
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.98.0
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Apply repo-local storage slice
+      - name: Apply and verify repo-local storage slice
         shell: bash
         run: |
+          git show HEAD^:.github/workflows/overhaul-storage-once.yml > /tmp/previous.yml
+          python3 - <<'PY'
+          from pathlib import Path
+
+          lines = Path('/tmp/previous.yml').read_text().splitlines()
+          out = []
+          capturing = False
+          for line in lines:
+              if not capturing and line == '        run: |':
+                  capturing = True
+                  continue
+              if not capturing:
+                  continue
+              if line.startswith('      - name: Commit verified storage overhaul'):
+                  break
+              if line.startswith('          '):
+                  line = line[10:]
+              if line == 'cargo fmt --all':
+                  break
+              out.append(line)
+          script = '\n'.join(out).rstrip() + '\n'
+          assert 'Path("tests/managed_default.rs")' in script
+          assert 'storage.write_text(text)' in script
+          Path('/tmp/apply-storage.sh').write_text(script)
+          PY
+          bash /tmp/apply-storage.sh
+
           python3 - <<'PY'
           from pathlib import Path
           import re
 
-          def sub(text, pattern, replacement, name):
-              text, count = re.subn(pattern, replacement, text, count=1, flags=re.S)
-              assert count == 1, f"{name} replacement count: {count}"
-              return text
-
-          main = Path("src/main.rs")
-          text = main.read_text()
-          text = sub(
-              text,
-              r"fn run\(cli: MemCli\) -> Result<\(\)> \{\n.*?\n    match cli\.command \{",
-              '''fn run(cli: MemCli) -> Result<()> {
-              let explicit_db = cli.db.is_some()
-                  || std::env::var_os("MEM_DB")
-                      .filter(|path| !path.is_empty())
-                      .is_some();
-              let db_path = database_path(cli.db.as_deref())?;
-              if !explicit_db && command_writes(&cli.command) {
-                  ensure_local_ignore(&db_path)?;
-              }
-              let router = StorageRouter::exact(db_path.clone());
-
-              match cli.command {''',
-              "run",
-          )
-          text = sub(
-              text,
-              r"        Command::Init\(_\) \| Command::Status\(_\) => \{.*?\n        \}\n        Command::Project\(command\) => \{",
-              '''        Command::Init(_) => {
-              let store = Store::open(&db_path)?;
-              let stats = store.stats()?;
-              let output = StatusOutput {
-                  database: db_path.display().to_string(),
-                  schema_version: stats.schema_version,
-                  total: stats.total,
-                  active: stats.active,
-                  superseded: stats.superseded,
-                  deleted: stats.deleted,
-              };
-              if cli.json {
-                  print_json(&output)?;
-              } else {
-                  println!("database: {}", output.database);
-                  println!("schema: {}", output.schema_version);
-                  println!(
-                      "memories: {} active / {} superseded / {} deleted / {} total",
-                      output.active, output.superseded, output.deleted, output.total
-                  );
-              }
-          }
-          Command::Status(_) => {
-              let output = match Store::open_existing(&db_path)? {
-                  Some(store) => {
-                      let stats = store.stats()?;
-                      StatusOutput {
-                          database: db_path.display().to_string(),
-                          schema_version: stats.schema_version,
-                          total: stats.total,
-                          active: stats.active,
-                          superseded: stats.superseded,
-                          deleted: stats.deleted,
-                      }
-                  }
-                  None => StatusOutput {
-                      database: db_path.display().to_string(),
-                      schema_version: 0,
-                      total: 0,
-                      active: 0,
-                      superseded: 0,
-                      deleted: 0,
-                  },
-              };
-              if cli.json {
-                  print_json(&output)?;
-              } else {
-                  println!("database: {}", output.database);
-                  if output.schema_version == 0 {
-                      println!("store: not initialized");
-                  } else {
-                      println!("schema: {}", output.schema_version);
-                      println!(
-                          "memories: {} active / {} superseded / {} deleted / {} total",
-                          output.active, output.superseded, output.deleted, output.total
-                      );
-                  }
-              }
-          }
-          Command::Project(command) => {''',
-              "init/status",
-          )
-          text = sub(
-              text,
-              r"/// Resolve the exact-file override for this invocation\..*?\nfn print_json",
-              '''/// Resolve the database for this invocation. Explicit overrides pin one
-          /// file. Otherwise `mem` uses `<project>/.mem/mem.db`. An existing
-          /// `.mem/` inside the current project wins; otherwise a Git root is the
-          /// project boundary, and non-Git use falls back to the current directory.
-          fn database_path(override_path: Option<&Path>) -> Result<PathBuf> {
-              if let Some(path) = override_path {
-                  return Ok(path.to_owned());
-              }
-              if let Some(path) = std::env::var_os("MEM_DB").filter(|path| !path.is_empty()) {
-                  return Ok(PathBuf::from(path));
-              }
-
-              let cwd = std::env::current_dir().context("determine current directory")?;
-              let project = ProjectContext::detect(None, None)?;
-              if let Some(root) = project.as_ref().and_then(|context| context.root.as_ref()) {
-                  for ancestor in cwd.ancestors() {
-                      let mem_dir = ancestor.join(".mem");
-                      if mem_dir.is_dir() {
-                          return Ok(mem_dir.join("mem.db"));
-                      }
-                      if ancestor == root {
-                          break;
-                      }
-                  }
-                  return Ok(root.join(".mem").join("mem.db"));
-              }
-              for ancestor in cwd.ancestors() {
-                  let mem_dir = ancestor.join(".mem");
-                  if mem_dir.is_dir() {
-                      return Ok(mem_dir.join("mem.db"));
-                  }
-              }
-              Ok(cwd.join(".mem").join("mem.db"))
-          }
-
-          fn command_writes(command: &Command) -> bool {
-              match command {
-                  Command::Init(_) | Command::Remember(_) | Command::Correct(_) | Command::Forget(_) => true,
-                  Command::State(state) => !matches!(&state.command, StateCommand::Show(_)),
-                  Command::Episode(episode) => !matches!(&episode.command, EpisodeSubcommand::Get(_)),
-                  Command::Index(index) => !matches!(&index.command, IndexSubcommand::Status(_)),
-                  _ => false,
-              }
-          }
-
-          fn ensure_local_ignore(db_path: &Path) -> Result<()> {
-              let directory = db_path
-                  .parent()
-                  .context("local memory database has no parent directory")?;
-              std::fs::create_dir_all(directory)
-                  .with_context(|| format!("create local memory directory {}", directory.display()))?;
-              let ignore = directory.join(".gitignore");
-              if !ignore.exists() {
-                  std::fs::write(&ignore, "*\\n")
-                      .with_context(|| format!("write {}", ignore.display()))?;
-              }
-              Ok(())
-          }
-
-          fn print_json''',
-              "database_path",
-          )
-          main.write_text(text)
-
-          storage = Path("src/storage.rs")
-          text = storage.read_text()
-          text = sub(
-              text,
-              r"Self::Exact\(path\) => Ok\(vec!\[ScopedStore \{\s*store: Store::open\(path\)\?,\s*project_filter: project_id\.map\(str::to_owned\),\s*\}\]\),",
-              '''Self::Exact(path) => match Store::open_existing(path)? {
-                  Some(store) => Ok(vec![ScopedStore {
-                      store,
-                      project_filter: project_id.map(str::to_owned),
-                  }]),
-                  None => Ok(Vec::new()),
-              },''',
-              "exact scope stores",
-          )
-          text = sub(
-              text,
-              r"Self::Exact\(path\) => Ok\(vec!\[Store::open\(path\)\?\]\),",
-              '''Self::Exact(path) => match Store::open_existing(path)? {
-                  Some(store) => Ok(vec![store]),
-                  None => Ok(Vec::new()),
-              },''',
-              "exact id stores",
-          )
-          text = sub(
-              text,
-              r"if let StorageRouter::Exact\(path\) = router \{\s*let store = Store::open\(path\)\?;\s*return crate::recall_hits\(&store, query, project_id, limit, force_lexical\);\s*\}",
-              '''if let StorageRouter::Exact(path) = router {
-              let Some(store) = Store::open_existing(path)? else {
-                  return Ok(Vec::new());
-              };
-              return crate::recall_hits(&store, query, project_id, limit, force_lexical);
-          }''',
-              "exact recall",
-          )
-          text = sub(
-              text,
-              r"if let StorageRouter::Exact\(path\) = router \{\s*let store = Store::open\(path\)\?;\s*return store\.search\(query, project_id, limit\);\s*\}",
-              '''if let StorageRouter::Exact(path) = router {
-              let Some(store) = Store::open_existing(path)? else {
-                  return Ok(Vec::new());
-              };
-              return store.search(query, project_id, limit);
-          }''',
-              "exact lexical search",
-          )
-          text = sub(
-              text,
-              r"if let StorageRouter::Exact\(path\) = router \{\s*let store = Store::open\(path\)\?;\s*return store\.semantic_search_by_vector\(\s*query_vector,\s*crate::embedding_worker::EMBEDDING_MODEL_ID,\s*project_id,\s*limit,\s*\);\s*\}",
-              '''if let StorageRouter::Exact(path) = router {
-              let Some(store) = Store::open_existing(path)? else {
-                  return Ok(Vec::new());
-              };
-              return store.semantic_search_by_vector(
-                  query_vector,
-                  crate::embedding_worker::EMBEDDING_MODEL_ID,
-                  project_id,
-                  limit,
-              );
-          }''',
-              "exact semantic search",
-          )
-          text = sub(
-              text,
-              r"\(StorageRouter::Exact\(path\), _\) => Store::open\(path\)\?,",
-              '''(StorageRouter::Exact(path), _) => {
-                  let Some(store) = Store::open_existing(path)? else {
-                      return Ok(Vec::new());
-                  };
-                  store
-              },''',
-              "exact history",
-          )
-          text = sub(
-              text,
-              r"StorageRouter::Exact\(path\) => \{\s*let store = Store::open\(path\)\?;\s*store\.workspace_state\(project_id, workspace_id\)\s*\}",
-              '''StorageRouter::Exact(path) => match Store::open_existing(path)? {
-                  Some(store) => store.workspace_state(project_id, workspace_id),
-                  None => Ok(None),
-              }''',
-              "exact state read",
-          )
-          storage.write_text(text)
-
-          Path("tests/managed_default.rs").write_text(r'''//! Integration coverage for repo-local default storage.
-
-          use std::path::{Path, PathBuf};
-          use std::process::{Command, Output};
-          use uuid::Uuid;
-
-          fn temp_dir() -> PathBuf {
-              let path = std::env::temp_dir().join(format!("mem-repo-local-{}", Uuid::now_v7()));
-              std::fs::create_dir_all(&path).expect("create temp dir");
-              path
-          }
-
-          fn command(cwd: &Path) -> Command {
-              let mut command = Command::new(env!("CARGO_BIN_EXE_mem"));
-              command.current_dir(cwd).env_remove("MEM_DB").env_remove("MEM_HOME");
-              command
-          }
-
-          fn run(cwd: &Path, args: &[&str]) -> Output {
-              command(cwd).args(args).output().expect("spawn mem")
-          }
-
-          fn run_json(cwd: &Path, args: &[&str]) -> serde_json::Value {
-              let output = command(cwd).arg("--json").args(args).output().expect("spawn mem");
-              assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
-              serde_json::from_slice(&output.stdout).expect("parse JSON")
-          }
-
-          #[test]
-          fn init_creates_repo_local_store_and_ignore_file() {
-              let cwd = temp_dir();
-              let value = run_json(&cwd, &["init"]);
-              let db = cwd.join(".mem/mem.db");
-              assert!(db.is_file());
-              assert_eq!(value["database"], db.display().to_string());
-              assert_eq!(std::fs::read_to_string(cwd.join(".mem/.gitignore")).unwrap(), "*\n");
-              std::fs::remove_dir_all(cwd).unwrap();
-          }
-
-          #[test]
-          fn absent_store_reads_do_not_initialize_storage() {
-              let cwd = temp_dir();
-              let status = run_json(&cwd, &["status"]);
-              assert_eq!(status["schema_version"], 0);
-              assert_eq!(status["total"], 0);
-              assert_eq!(run_json(&cwd, &["search", "nothing", "--global"]).as_array().map(Vec::len), Some(0));
-              assert_eq!(run_json(&cwd, &["context", "nothing"])["memories"].as_array().map(Vec::len), Some(0));
-              assert!(!cwd.join(".mem").exists());
-              std::fs::remove_dir_all(cwd).unwrap();
-          }
-
-          #[test]
-          fn write_initializes_repo_local_storage_without_init() {
-              let cwd = temp_dir();
-              let value = run_json(&cwd, &["remember", "repo-local memory", "--global", "--source-type", "test"]);
-              assert_eq!(value["text"], "repo-local memory");
-              assert!(cwd.join(".mem/mem.db").is_file());
-              assert!(cwd.join(".mem/.gitignore").is_file());
-              std::fs::remove_dir_all(cwd).unwrap();
-          }
-
-          #[test]
-          fn explicit_database_bypasses_repo_local_storage() {
-              let cwd = temp_dir();
-              let db = cwd.join("exact.db");
-              let output = command(&cwd)
-                  .args(["--db", db.to_str().unwrap(), "remember", "exact memory", "--global", "--source-type", "test"])
-                  .output()
-                  .unwrap();
-              assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
-              assert!(db.is_file());
-              assert!(!cwd.join(".mem").exists());
-              std::fs::remove_dir_all(cwd).unwrap();
-          }
-
-          #[test]
-          fn nested_commands_reuse_nearest_existing_mem_directory() {
-              let root = temp_dir();
-              let nested = root.join("a/b/c");
-              std::fs::create_dir_all(&nested).unwrap();
-              assert!(run(&root, &["init"]).status.success());
-              let value = run_json(&nested, &["status"]);
-              assert_eq!(value["database"], root.join(".mem/mem.db").display().to_string());
-              std::fs::remove_dir_all(root).unwrap();
-          }
-
-          #[test]
-          fn git_repo_root_is_default_project_boundary() {
-              let root = temp_dir();
-              let git = Command::new("git").args(["init", "-q", root.to_str().unwrap()]).output().unwrap();
-              assert!(git.status.success());
-              let nested = root.join("src/deep");
-              std::fs::create_dir_all(&nested).unwrap();
-              let value = run_json(&nested, &["status"]);
-              assert_eq!(value["database"], root.join(".mem/mem.db").display().to_string());
-              assert!(!root.join(".mem").exists(), "read must not initialize the repo store");
-              std::fs::remove_dir_all(root).unwrap();
-          }
-          ''')
+          path = Path('src/storage.rs')
+          text = path.read_text()
+          patterns = [
+              r'\n    pub fn managed\(\) -> Result<Self> \{\n        Ok\(Self::Managed\(ManagedLayout::resolve\(\)\?\)\)\n    \}\n',
+              r'\n    /// The managed layout this router uses\. Exact-file routers have none\.\n    pub fn managed_layout\(&self\) -> &ManagedLayout \{\n        match self \{\n            Self::Managed\(layout\) => layout,\n            Self::Exact\(_\) => panic!\("managed_layout on an exact-file router"\),\n        \}\n    \}\n',
+          ]
+          for pattern in patterns:
+              text, count = re.subn(pattern, '\n', text, count=1)
+              assert count == 1, f'dead helper removal count: {count}'
+          path.write_text(text)
           PY
 
           cargo fmt --all
