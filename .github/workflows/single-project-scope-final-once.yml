@@ -39,48 +39,51 @@ jobs:
           text = path.read_text()
           needle = 'cargo fmt --all\n'
           assert needle in text, 'verification boundary not found'
-          helper_patch = r'''python3 - <<'PY2'
-          from pathlib import Path
-
-          path = Path('tests/real_corpus_eval.rs')
-          text = path.read_text()
-          if 'fn context_ids(db: &Path, query: &str, lexical: bool)' not in text:
-              marker = 'fn semantic_ids(db: &Path, query: &str) -> Vec<String> {'
-              assert marker in text, 'real corpus semantic helper missing'
-              helper = '''fn context_ids(db: &Path, query: &str, lexical: bool) -> Vec<String> {
-              if lexical {
-                  return lexical_ids(db, query);
-              }
-              let limit = LIMIT.to_string();
-              run_json(
-                  db,
-                  &[
-                      "context",
-                      query,
-                      "--workspace",
-                      WORKSPACE,
-                      "-n",
-                      limit.as_str(),
-                  ],
-              )["memories"]
-                  .as_array()
-                  .expect("context memories array")
-                  .iter()
-                  .map(|item| {
-                      item["memory"]["id"]
-                          .as_str()
-                          .expect("context memory ID")
-                          .to_owned()
-                  })
-                  .collect()
-          }
-
-          '''.replace('\n              ', '\n')
-              text = text.replace(marker, helper + marker, 1)
-          path.write_text(text)
-          PY2
-
-          '''.replace('\n          ', '\n')
+          helper_lines = [
+              "python3 - <<'PY2'",
+              "from pathlib import Path",
+              "",
+              "path = Path('tests/real_corpus_eval.rs')",
+              "text = path.read_text()",
+              "if 'fn context_ids(db: &Path, query: &str, lexical: bool)' not in text:",
+              "    marker = 'fn semantic_ids(db: &Path, query: &str) -> Vec<String> {'",
+              "    assert marker in text, 'real corpus semantic helper missing'",
+              "    helper = '\\n'.join([",
+              "        'fn context_ids(db: &Path, query: &str, lexical: bool) -> Vec<String> {',",
+              "        '    if lexical {',",
+              "        '        return lexical_ids(db, query);',",
+              "        '    }',",
+              "        '    let limit = LIMIT.to_string();',",
+              "        '    run_json(',",
+              "        '        db,',",
+              "        '        &[',",
+              "        '            \\\"context\\\",',",
+              "        '            query,',",
+              "        '            \\\"--workspace\\\",',",
+              "        '            WORKSPACE,',",
+              "        '            \\\"-n\\\",',",
+              "        '            limit.as_str(),',",
+              "        '        ],',",
+              "        '    )[\\\"memories\\\"]',",
+              "        '        .as_array()',",
+              "        '        .expect(\\\"context memories array\\\")',",
+              "        '        .iter()',",
+              "        '        .map(|item| {',",
+              "        '            item[\\\"memory\\\"][\\\"id\\\"]',",
+              "        '                .as_str()',",
+              "        '                .expect(\\\"context memory ID\\\")',",
+              "        '                .to_owned()',",
+              "        '        })',",
+              "        '        .collect()',",
+              "        '}',",
+              "        '',",
+              "    ])",
+              "    text = text.replace(marker, helper + marker, 1)",
+              "path.write_text(text)",
+              "PY2",
+              "",
+          ]
+          helper_patch = '\n'.join(helper_lines)
           path.write_text(text.replace(needle, helper_patch + needle, 1))
           PY
 
