@@ -1,0 +1,22 @@
+{
+  "project": "mem",
+  "ref": "r8l2",
+  "title": "Move default storage to repo-local .mem",
+  "description": "Replace the centralized managed layout with one project-local `.mem/mem.db` as the normal store. Preserve `--db` / `MEM_DB` exact-file overrides and the current memory schema/retrieval behavior during this slice. Inside Git, resolve the repository root; outside Git, use an explicitly initialized `.mem` project boundary. Reads must not create empty stores. Remove the need for Git-remote-derived database routing, central project path encoding, global/user-store merging, and cross-project ID scans. Keep the change narrow enough that retrieval/schema changes can be evaluated separately.",
+  "status": "open",
+  "priority": 2,
+  "labels": [
+    "storage",
+    "simplification"
+  ],
+  "assignees": null,
+  "parent": null,
+  "blocked_by": [],
+  "estimate": null,
+  "due_date": null,
+  "logs": [],
+  "created_at": "2026-09-04T02:53:00Z",
+  "updated_at": "2026-09-04T02:53:00Z",
+  "completed_at": null,
+  "external": {}
+}
