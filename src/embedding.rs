@@ -1,110 +1,55 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use rusqlite::{OptionalExtension, TransactionBehavior, params};
+use rusqlite::params;
 
-use crate::embedding_worker::EMBEDDING_MODEL_ID;
 use crate::store::Store;
 
 impl Store {
-    /// Commit one embedding result and consume its exact claimed lease.
-    /// The vector store keys one production embedding model per entity; a
-    /// commit naming any other model would permanently satisfy the job
-    /// without producing the vector semantic retrieval needs, so non-production
-    /// models are rejected outright.
-    pub fn commit_embedding(
-        &mut self,
-        job_id: &str,
-        generation: i64,
-        lease_token: &str,
+    pub(crate) fn upsert_embedding_if_current(
+        &self,
+        memory_id: &str,
+        source_updated_at: i64,
         model: &str,
         vector: &[f32],
     ) -> Result<bool> {
-        validate_commit(job_id, generation, lease_token, model, vector)?;
-        if model != EMBEDDING_MODEL_ID {
-            bail!(
-                "embedding commit requires the production model {EMBEDDING_MODEL_ID}; got {model}"
-            );
+        if memory_id.trim().is_empty() {
+            bail!("memory ID cannot be empty");
+        }
+        if model.trim().is_empty() {
+            bail!("embedding model cannot be empty");
         }
         let normalized = normalize(vector)?;
         let encoded = encode_vector(&normalized);
         let dimensions = i64::try_from(normalized.len())?;
         let now = unix_millis()?;
 
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let claim: Option<(String, String)> = transaction
-            .query_row(
-                "SELECT entity_type, entity_id\n\
-                 FROM index_jobs\n\
-                 WHERE id = ?1\n\
-                   AND generation = ?2\n\
-                   AND state = 'running'\n\
-                   AND lease_token = ?3\n\
-                   AND index_kind = 'embedding'",
-                params![job_id, generation, lease_token],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        let Some((entity_type, entity_id)) = claim else {
-            return Ok(false);
-        };
-
-        transaction.execute(
+        let changed = self.connection.execute(
             "INSERT INTO embeddings (\n\
-                 entity_type, entity_id, model, dimensions, vector, source_generation, updated_at\n\
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)\n\
-             ON CONFLICT(entity_type, entity_id, model) DO UPDATE SET\n\
+                 memory_id, model, dimensions, vector, source_updated_at, updated_at\n\
+             )\n\
+             SELECT id, ?3, ?4, ?5, updated_at, ?6\n\
+             FROM memories\n\
+             WHERE id = ?1 AND status = 'active' AND updated_at = ?2\n\
+             ON CONFLICT(memory_id, model) DO UPDATE SET\n\
                  dimensions = excluded.dimensions,\n\
                  vector = excluded.vector,\n\
-                 source_generation = excluded.source_generation,\n\
+                 source_updated_at = excluded.source_updated_at,\n\
                  updated_at = excluded.updated_at",
             params![
-                entity_type,
-                entity_id,
+                memory_id,
+                source_updated_at,
                 model,
                 dimensions,
                 encoded,
-                generation,
                 now
             ],
         )?;
-        let consumed = transaction.execute(
-            "DELETE FROM index_jobs\n\
-             WHERE id = ?1\n\
-               AND generation = ?2\n\
-               AND state = 'running'\n\
-               AND lease_token = ?3",
-            params![job_id, generation, lease_token],
-        )?;
-        if consumed != 1 {
-            bail!("embedding lease changed while result was being committed");
-        }
-        transaction.commit()?;
-        Ok(true)
+        Ok(changed == 1)
     }
 }
 
-fn validate_commit(
-    job_id: &str,
-    generation: i64,
-    lease_token: &str,
-    model: &str,
-    vector: &[f32],
-) -> Result<()> {
-    if job_id.trim().is_empty() {
-        bail!("index job identifier cannot be empty");
-    }
-    if generation <= 0 {
-        bail!("index job generation must be greater than zero");
-    }
-    if lease_token.trim().is_empty() {
-        bail!("index job lease token cannot be empty");
-    }
-    if model.trim().is_empty() {
-        bail!("embedding model identifier cannot be empty");
-    }
+fn normalize(vector: &[f32]) -> Result<Vec<f32>> {
     if vector.is_empty() {
         bail!("embedding vector cannot be empty");
     }
@@ -114,10 +59,6 @@ fn validate_commit(
     if vector.iter().any(|value| !value.is_finite()) {
         bail!("embedding vector must contain only finite values");
     }
-    Ok(())
-}
-
-fn normalize(vector: &[f32]) -> Result<Vec<f32>> {
     let squared_norm = vector
         .iter()
         .map(|value| f64::from(*value) * f64::from(*value))
@@ -149,234 +90,56 @@ fn unix_millis() -> Result<i64> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
-    use uuid::Uuid;
-
-    use super::{EMBEDDING_MODEL_ID, Store};
-    use crate::store::NewMemory;
-    use rusqlite::params;
+    use crate::store::{NewMemory, Store};
 
     #[test]
-    fn embedding_commit_is_atomic_normalized_and_consumes_lease() {
-        let path = test_path();
-        let mut store = Store::open(&path).expect("open test store");
+    fn stale_source_versions_cannot_overwrite_embeddings() {
+        let path = std::env::temp_dir().join(format!(
+            "mem-embedding-test-{}.db",
+            uuid::Uuid::now_v7()
+        ));
+        let store = Store::open(&path).expect("open");
         let memory = store
             .remember(NewMemory {
-                text: "normalize this embedding".to_owned(),
+                text: "first text".to_owned(),
                 kind: "fact".to_owned(),
-                project_id: None,
                 actor: "agent".to_owned(),
                 source_type: "test".to_owned(),
                 source_ref: None,
             })
-            .expect("store memory");
-        let job = store
-            .claim_index_jobs("worker-a", 1, Duration::from_secs(30))
-            .expect("claim embedding job")
-            .pop()
-            .expect("claimed job");
-
-        let error = store
-            .commit_embedding(
-                &job.id,
-                job.generation,
-                &job.lease_token,
-                "other-model",
-                &[3.0, 4.0],
-            )
-            .expect_err("non-production model must be rejected");
-        assert!(
-            format!("{error:#}").contains("requires the production model"),
-            "unexpected rejection message: {error:#}"
-        );
-        let stats = store.index_job_stats().expect("read queue stats");
-        assert_eq!(
-            stats.running, 1,
-            "rejected commit must not consume the lease"
-        );
-        let stray_count: i64 = store
-            .connection
-            .query_row(
-                "SELECT COUNT(*) FROM embeddings WHERE model = 'other-model'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("count stray vectors");
-        assert_eq!(stray_count, 0, "rejected commit must not persist a vector");
-
+            .expect("remember");
         assert!(
             store
-                .commit_embedding(
-                    &job.id,
-                    job.generation,
-                    &job.lease_token,
-                    EMBEDDING_MODEL_ID,
-                    &[3.0, 4.0],
+                .upsert_embedding_if_current(
+                    &memory.id,
+                    memory.updated_at,
+                    "model",
+                    &[3.0, 4.0]
                 )
-                .expect("commit embedding")
+                .expect("commit")
         );
-        assert_eq!(job.entity_id, memory.id);
-        let stats = store.index_job_stats().expect("read queue stats");
-        assert_eq!(stats.pending, 0);
-        assert_eq!(stats.running, 0);
-
-        let (dimensions, bytes, source_generation): (i64, Vec<u8>, i64) = store
-            .connection
-            .query_row(
-                "SELECT dimensions, vector, source_generation\n\
-                 FROM embeddings\n\
-                 WHERE entity_type = 'memory' AND entity_id = ?1 AND model = ?2",
-                params![&memory.id, EMBEDDING_MODEL_ID],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .expect("read stored embedding");
-        assert_eq!(dimensions, 2);
-        assert_eq!(source_generation, job.generation);
-        let values = decode(&bytes);
-        assert!((values[0] - 0.6).abs() < 1e-6);
-        assert!((values[1] - 0.8).abs() < 1e-6);
-
-        drop(store);
-        cleanup(&path);
-    }
-
-    #[test]
-    fn stale_claim_cannot_write_after_source_refresh() {
-        let path = test_path();
-        let mut store = Store::open(&path).expect("open test store");
-        let memory = store
-            .remember(NewMemory {
-                text: "first source text".to_owned(),
-                kind: "fact".to_owned(),
-                project_id: None,
-                actor: "agent".to_owned(),
-                source_type: "test".to_owned(),
-                source_ref: None,
-            })
-            .expect("store memory");
-        let stale = store
-            .claim_index_jobs("worker-a", 1, Duration::from_secs(30))
-            .expect("claim first generation")
-            .pop()
-            .expect("claimed job");
-
-        // Memories have no in-place text update API (correction supersedes
-        // instead), so refresh the canonical text directly — the path the
-        // memories_index_job_active_update trigger guards.
         store
             .connection
             .execute(
-                "UPDATE memories\n\
-                 SET text = 'refreshed source text', updated_at = updated_at + 1 WHERE id = ?1",
-                params![&memory.id],
+                "UPDATE memories SET text = 'second text', updated_at = updated_at + 1 WHERE id = ?1",
+                [&memory.id],
             )
-            .expect("refresh canonical text");
-
+            .expect("refresh");
         assert!(
             !store
-                .commit_embedding(
-                    &stale.id,
-                    stale.generation,
-                    &stale.lease_token,
-                    EMBEDDING_MODEL_ID,
-                    &[1.0, 0.0],
+                .upsert_embedding_if_current(
+                    &memory.id,
+                    memory.updated_at,
+                    "model",
+                    &[1.0, 0.0]
                 )
-                .expect("reject stale embedding")
+                .expect("reject stale")
         );
-        let embedding_count: i64 = store
+        let count: i64 = store
             .connection
-            .query_row(
-                "SELECT COUNT(*) FROM embeddings WHERE entity_id = ?1",
-                [&memory.id],
-                |row| row.get(0),
-            )
-            .expect("count embeddings");
-        assert_eq!(embedding_count, 0);
-        let queued = store
-            .claim_index_jobs("worker-b", 1, Duration::from_secs(30))
-            .expect("claim refreshed work")
-            .pop()
-            .expect("refreshed job");
-        assert_eq!(queued.entity_id, memory.id);
-        assert_ne!(queued.lease_token, stale.lease_token);
-
-        drop(store);
-        cleanup(&path);
-    }
-
-    #[test]
-    fn source_refresh_invalidates_a_previously_committed_vector() {
-        let path = test_path();
-        let mut store = Store::open(&path).expect("open test store");
-        let memory = store
-            .remember(NewMemory {
-                text: "before refresh".to_owned(),
-                kind: "fact".to_owned(),
-                project_id: None,
-                actor: "agent".to_owned(),
-                source_type: "test".to_owned(),
-                source_ref: None,
-            })
-            .expect("store memory");
-        let job = store
-            .claim_index_jobs("worker-a", 1, Duration::from_secs(30))
-            .expect("claim work")
-            .pop()
-            .expect("claimed work");
-        assert!(
-            store
-                .commit_embedding(
-                    &job.id,
-                    job.generation,
-                    &job.lease_token,
-                    EMBEDDING_MODEL_ID,
-                    &[1.0, 1.0],
-                )
-                .expect("commit vector")
-        );
-
-        // Direct canonical text refresh — the path the
-        // memories_embedding_invalidate_active_update trigger guards.
-        store
-            .connection
-            .execute(
-                "UPDATE memories\n\
-                 SET text = 'after refresh', updated_at = updated_at + 1 WHERE id = ?1",
-                params![&memory.id],
-            )
-            .expect("refresh source");
-        let embedding_count: i64 = store
-            .connection
-            .query_row(
-                "SELECT COUNT(*) FROM embeddings WHERE entity_id = ?1",
-                [&memory.id],
-                |row| row.get(0),
-            )
-            .expect("count invalidated vectors");
-        assert_eq!(embedding_count, 0);
-        assert_eq!(store.index_job_stats().expect("read queue").pending, 1);
-
-        drop(store);
-        cleanup(&path);
-    }
-
-    fn decode(bytes: &[u8]) -> Vec<f32> {
-        let (chunks, remainder) = bytes.as_chunks::<4>();
-        assert!(remainder.is_empty());
-        chunks
-            .iter()
-            .map(|chunk| f32::from_le_bytes(*chunk))
-            .collect()
-    }
-
-    fn test_path() -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("mem-embedding-test-{}.db", Uuid::now_v7()))
-    }
-
-    fn cleanup(path: &std::path::Path) {
+            .query_row("SELECT COUNT(*) FROM embeddings", [], |row| row.get(0))
+            .expect("count");
+        assert_eq!(count, 0);
         let _ = std::fs::remove_file(path);
-        let _ = std::fs::remove_file(path.with_extension("db-shm"));
-        let _ = std::fs::remove_file(path.with_extension("db-wal"));
     }
 }
