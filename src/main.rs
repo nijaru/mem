@@ -5,7 +5,6 @@ mod id_resolve;
 mod index_job;
 mod project;
 mod storage;
-mod storage_migration;
 mod store;
 mod vector_search;
 
@@ -23,17 +22,11 @@ use crate::embedding_worker::{
 };
 use crate::episode::{NewEpisode, NewEpisodeEntry};
 use crate::project::ProjectContext;
-use crate::storage::{ManagedLayout, ProjectDb, StorageRouter};
+use crate::storage::StorageRouter;
 
-/// The low-level worker protocol operates on one exact database. In managed
-/// operation the caller must pin the database with `--db`/`MEM_DB`.
+/// Open the current database for a low-level index mutation.
 fn require_exact_store(router: &StorageRouter) -> Result<Store> {
-    match router {
-        StorageRouter::Exact(path) => Store::open(path),
-        StorageRouter::Managed(_) => bail!(
-            "index claim/commit/complete/retry require an exact database; pass --db or set MEM_DB"
-        ),
-    }
+    Store::open(router.path())
 }
 use crate::store::{
     Memory, MemorySource, NewCorrection, NewMemory, NewWorkspaceState, NewWorkspaceStatePatch,
@@ -70,7 +63,6 @@ enum Command {
     Episode(EpisodeCommand),
     History(History),
     Index(IndexCommand),
-    Storage(StorageCommand),
 }
 
 /// Initialize the local memory database.
@@ -439,47 +431,6 @@ struct IndexCommand {
     command: IndexSubcommand,
 }
 
-/// Manage the managed storage layout.
-#[derive(Args)]
-struct StorageCommand {
-    #[usage(subcommand)]
-    command: StorageSubcommand,
-}
-
-#[derive(Subcommands)]
-enum StorageSubcommand {
-    /// Show the managed-layout inventory without creating files.
-    Status(StorageStatus),
-    /// Migrate a legacy single-file store into the managed layout.
-    Migrate(StorageMigrate),
-    /// Delete one project's managed database and sidecars.
-    Purge(StoragePurge),
-}
-
-/// Show the managed-layout inventory.
-#[derive(Args)]
-struct StorageStatus;
-
-/// Migrate legacy storage into the managed layout.
-#[derive(Args)]
-struct StorageMigrate {
-    /// Legacy database file to migrate from.
-    #[usage(long)]
-    from: Option<String>,
-}
-
-/// Purge one project from the managed layout.
-#[derive(Args)]
-struct StoragePurge {
-    /// Project identifier whose managed database should be deleted.
-    #[usage(long)]
-    project: String,
-
-    /// Do not ask for confirmation.
-    #[usage(long)]
-    yes: bool,
-}
-
 #[derive(Subcommands)]
 enum IndexSubcommand {
     Status(IndexStatus),
@@ -514,11 +465,6 @@ struct IndexRun {
     /// downloading the model.
     #[usage(long)]
     cached_only: bool,
-
-    /// Maintenance mode: process every existing managed project database,
-    /// not just the current scope. Managed layout only.
-    #[usage(long)]
-    all: bool,
 }
 
 /// Claim pending or expired derived-index work.
@@ -1147,7 +1093,7 @@ fn run(cli: MemCli) -> Result<()> {
                 let stats = crate::storage::routed_run_index(
                     &router,
                     project_id,
-                    command.all,
+                    false,
                     EmbeddingRunOptions {
                         limit: command.limit.unwrap_or(64).min(1000),
                         lease_duration: Duration::from_secs(
@@ -1175,9 +1121,6 @@ fn run(cli: MemCli) -> Result<()> {
                 }
             }
             IndexSubcommand::Claim(command) => {
-                // Low-level worker protocol operations must be pinned to one
-                // exact database: a worker holds a lease in one file, and
-                // managed operation must not guess which store owns a job.
                 let mut store = require_exact_store(&router)?;
                 let jobs = store.claim_index_jobs(
                     &command.worker,
@@ -1281,102 +1224,6 @@ fn run(cli: MemCli) -> Result<()> {
                 }
             }
         },
-        Command::Storage(command) => match command.command {
-            StorageSubcommand::Status(_) => {
-                let layout = ManagedLayout::resolve()?;
-                let report = crate::storage::storage_status_report(&layout)?;
-                if cli.json {
-                    print_json(&report)?;
-                } else {
-                    println!("managed root: {}", report.managed_root);
-                    println!("layout: {} ({})", report.layout_version, {
-                        if report.layout_exists {
-                            "active"
-                        } else {
-                            "not created"
-                        }
-                    });
-                    println!("user store: {}", report.user_store.path);
-                    println!(
-                        "legacy store: {} ({})",
-                        report.legacy_db,
-                        if report.legacy_db_exists {
-                            "present"
-                        } else {
-                            "absent"
-                        }
-                    );
-                    if report.migration_needed {
-                        println!("migration needed: run `mem storage migrate`");
-                    }
-                    for store in &report.project_stores {
-                        println!("project {}: {}", store.project_id, store.path);
-                    }
-                }
-            }
-            StorageSubcommand::Migrate(command) => {
-                let layout = if let Some(from) = &command.from {
-                    ManagedLayout::at(legacy_root_from(PathBuf::from(from)))
-                } else {
-                    ManagedLayout::resolve()?
-                };
-                let report = storage_migration::migrate_layout(&layout)?;
-                if cli.json {
-                    print_json(&report)?;
-                } else {
-                    match report.state {
-                        storage_migration::MigrationState::AlreadyActive => {
-                            println!(
-                                "layout already active at {}; nothing to migrate",
-                                report.layout_dir
-                            );
-                        }
-                        storage_migration::MigrationState::NoLegacyStore => {
-                            println!(
-                                "no legacy store at {}; nothing to migrate",
-                                report.legacy_db
-                            );
-                        }
-                        storage_migration::MigrationState::Migrated => {
-                            println!("migrated {} memories", report.memories);
-                            println!("migrated {} episodes", report.episodes);
-                            println!("migrated {} workspaces", report.workspaces);
-                            for store in &report.stores {
-                                println!("store: {store}");
-                            }
-                            println!("legacy store left untouched at {}", report.legacy_db);
-                        }
-                    }
-                }
-            }
-            StorageSubcommand::Purge(command) => {
-                let layout = ManagedLayout::resolve()?;
-                if command.project.trim().is_empty() {
-                    bail!("project identifier cannot be empty");
-                }
-                let ProjectDb { path, .. } = layout.project_db(&command.project)?;
-                if !command.yes && !cli.json {
-                    let mut answer = String::new();
-                    println!(
-                        "purge project {} (database {})? This cannot be undone. [y/N]",
-                        command.project,
-                        path.display()
-                    );
-                    std::io::stdin().read_line(&mut answer)?;
-                    if !answer.trim().eq_ignore_ascii_case("y") {
-                        bail!("purge cancelled");
-                    }
-                }
-                let report = storage_migration::purge_project_db(&layout, &command.project)?;
-                if cli.json {
-                    print_json(&report)?;
-                } else if report.removed {
-                    println!("purged {}", report.path);
-                } else {
-                    println!("no managed database for {}", report.project_id);
-                }
-            }
-        },
     }
 
     Ok(())
@@ -1470,18 +1317,6 @@ fn cached_query_vector(query: &str) -> Result<Option<Vec<f32>>> {
     };
     // Fail open: a cached-but-broken model must not break adapter recall.
     Ok(embed_query_if_cached(query, &cache_dir).unwrap_or(None))
-}
-
-/// Interpret a `storage migrate --from` value as the legacy root: the
-/// documented contract is a legacy database file, but passing its
-/// containing directory must also work, so a file path is reduced to its
-/// parent directory and a directory path is used as-is.
-fn legacy_root_from(from: PathBuf) -> PathBuf {
-    if from.is_file() {
-        from.parent().map(Path::to_path_buf).unwrap_or(from)
-    } else {
-        from
-    }
 }
 
 fn print_context(output: &ContextOutput) {
@@ -1719,8 +1554,7 @@ mod cli_parse_tests {
 
     #[test]
     fn id_commands_take_no_scope_flags() {
-        // get/forget/correct resolve across managed stores by design, so
-        // they must not grow --project/--global until routing changes.
+        // ID-directed operations resolve inside the current project store.
         let get = parse("get 01abc");
         assert!(matches!(get.command, super::Command::Get(_)));
         let forget = parse("forget 01abc");
