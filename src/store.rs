@@ -204,7 +204,11 @@ impl Store {
         self.memory_by_id(&id)
     }
 
-    pub fn correct(&mut self, id_or_prefix: &str, input: NewCorrection) -> Result<CorrectionResult> {
+    pub fn correct(
+        &mut self,
+        id_or_prefix: &str,
+        input: NewCorrection,
+    ) -> Result<CorrectionResult> {
         let previous_id = self.resolve_memory_id(id_or_prefix)?;
         let previous = self.memory_by_id(&previous_id)?;
         if previous.status != "active" {
@@ -357,10 +361,10 @@ impl Store {
 
     pub fn clear_workspace_state(&self, workspace: &str) -> Result<bool> {
         validate_identity(workspace, "workspace")?;
-        Ok(self
-            .connection
-            .execute("DELETE FROM workspace_state WHERE workspace = ?1", [workspace])?
-            > 0)
+        Ok(self.connection.execute(
+            "DELETE FROM workspace_state WHERE workspace = ?1",
+            [workspace],
+        )? > 0)
     }
 
     pub fn embedding_coverage(&self, model: &str) -> Result<EmbeddingCoverage> {
@@ -442,28 +446,45 @@ impl Store {
     }
 
     fn migrate(&self) -> Result<()> {
-        let version = self.schema_version()?;
-        if version > SCHEMA_VERSION {
-            bail!(
-                "database schema version {version} is newer than supported version {SCHEMA_VERSION}"
-            );
+        self.connection.execute_batch("BEGIN IMMEDIATE;")?;
+        let result = (|| -> Result<()> {
+            let version = self.schema_version()?;
+            if version > SCHEMA_VERSION {
+                bail!(
+                    "database schema version {version} is newer than supported version {SCHEMA_VERSION}"
+                );
+            }
+            match version {
+                0 => self
+                    .connection
+                    .execute_batch(include_str!("../migrations/schema.sql"))?,
+                6 => self
+                    .connection
+                    .execute_batch(include_str!("../migrations/0007_lean_core.sql"))?,
+                7 => {}
+                1..=5 => bail!(
+                    "database schema version {version} is from an unsupported pre-1.0 build; upgrade it to v6 with the previous mem build first"
+                ),
+                _ => unreachable!(),
+            }
+            let version = self.schema_version()?;
+            if version != SCHEMA_VERSION {
+                bail!(
+                    "failed to migrate database to schema version {SCHEMA_VERSION}; got {version}"
+                );
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                self.connection.execute_batch("COMMIT;")?;
+                Ok(())
+            }
+            Err(error) => {
+                let _ = self.connection.execute_batch("ROLLBACK;");
+                Err(error)
+            }
         }
-        match version {
-            0 => self.connection.execute_batch(include_str!("../migrations/schema.sql"))?,
-            6 => self
-                .connection
-                .execute_batch(include_str!("../migrations/0007_lean_core.sql"))?,
-            7 => {}
-            1..=5 => bail!(
-                "database schema version {version} is from an unsupported pre-1.0 build; upgrade it to v6 with the previous mem build first"
-            ),
-            _ => unreachable!(),
-        }
-        let version = self.schema_version()?;
-        if version != SCHEMA_VERSION {
-            bail!("failed to migrate database to schema version {SCHEMA_VERSION}; got {version}");
-        }
-        Ok(())
     }
 
     fn schema_version(&self) -> Result<i64> {

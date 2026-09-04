@@ -88,10 +88,7 @@ mod tests {
             assert!(store.get(wildcard).is_err());
         }
         assert_eq!(
-            store
-                .get(&memory.id[..8])
-                .expect("resolve prefix")
-                .id,
+            store.get(&memory.id[..8]).expect("resolve prefix").id,
             memory.id
         );
         let _ = std::fs::remove_file(path);

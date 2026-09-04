@@ -156,10 +156,8 @@ mod tests {
 
     #[test]
     fn exact_scan_ranks_all_current_active_vectors() {
-        let path = std::env::temp_dir().join(format!(
-            "mem-vector-test-{}.db",
-            uuid::Uuid::now_v7()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("mem-vector-test-{}.db", uuid::Uuid::now_v7()));
         let store = Store::open(&path).expect("open");
         let first = remember(&store, "first");
         let best = remember(&store, "best");

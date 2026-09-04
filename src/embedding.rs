@@ -94,10 +94,8 @@ mod tests {
 
     #[test]
     fn stale_source_versions_cannot_overwrite_embeddings() {
-        let path = std::env::temp_dir().join(format!(
-            "mem-embedding-test-{}.db",
-            uuid::Uuid::now_v7()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("mem-embedding-test-{}.db", uuid::Uuid::now_v7()));
         let store = Store::open(&path).expect("open");
         let memory = store
             .remember(NewMemory {
@@ -110,12 +108,7 @@ mod tests {
             .expect("remember");
         assert!(
             store
-                .upsert_embedding_if_current(
-                    &memory.id,
-                    memory.updated_at,
-                    "model",
-                    &[3.0, 4.0]
-                )
+                .upsert_embedding_if_current(&memory.id, memory.updated_at, "model", &[3.0, 4.0])
                 .expect("commit")
         );
         store
@@ -127,12 +120,7 @@ mod tests {
             .expect("refresh");
         assert!(
             !store
-                .upsert_embedding_if_current(
-                    &memory.id,
-                    memory.updated_at,
-                    "model",
-                    &[1.0, 0.0]
-                )
+                .upsert_embedding_if_current(&memory.id, memory.updated_at, "model", &[1.0, 0.0])
                 .expect("reject stale")
         );
         let count: i64 = store

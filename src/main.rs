@@ -14,8 +14,8 @@ use serde::Serialize;
 use usage::{Args, Cli, Subcommands};
 
 use crate::embedding_worker::{
-    EMBEDDING_MODEL_ID, EmbeddingRunOptions, EmbeddingRunStats, embed_query,
-    embed_query_if_cached, model_cache_dir,
+    EMBEDDING_MODEL_ID, EmbeddingRunOptions, EmbeddingRunStats, embed_query, embed_query_if_cached,
+    model_cache_dir,
 };
 use crate::store::{
     Memory, NewCorrection, NewMemory, SearchHit, Store, WorkspaceState, WorkspaceStateUpdate,
@@ -438,7 +438,10 @@ fn run(cli: MemCli) -> Result<()> {
             if cli.json {
                 print_json(&result)?;
             } else {
-                println!("corrected {} -> {}", result.previous.id, result.replacement.id);
+                println!(
+                    "corrected {} -> {}",
+                    result.previous.id, result.replacement.id
+                );
                 println!(
                     "{}\t{}\t{}",
                     result.replacement.id, result.replacement.kind, result.replacement.text
@@ -476,7 +479,10 @@ fn run(cli: MemCli) -> Result<()> {
                     print_json(&hits)?;
                 } else {
                     for hit in hits {
-                        println!("{}\t{}\t{}", hit.memory.id, hit.memory.kind, hit.memory.text);
+                        println!(
+                            "{}\t{}\t{}",
+                            hit.memory.id, hit.memory.kind, hit.memory.text
+                        );
                     }
                 }
             }
@@ -677,7 +683,8 @@ fn print_workspace_state(state: &WorkspaceState) {
 }
 
 fn require_store(path: &Path) -> Result<Store> {
-    Store::open_existing(path)?.with_context(|| format!("memory store not found: {}", path.display()))
+    Store::open_existing(path)?
+        .with_context(|| format!("memory store not found: {}", path.display()))
 }
 
 fn database_path(override_path: Option<&Path>) -> Result<PathBuf> {
@@ -712,7 +719,12 @@ fn database_path(override_path: Option<&Path>) -> Result<PathBuf> {
 
 fn command_creates_store(command: &Command) -> bool {
     matches!(command, Command::Init(_) | Command::Remember(_))
-        || matches!(command, Command::State(State { command: StateCommand::Set(_) }))
+        || matches!(
+            command,
+            Command::State(State {
+                command: StateCommand::Set(_)
+            })
+        )
 }
 
 fn ensure_local_ignore(db_path: &Path) -> Result<()> {
@@ -723,8 +735,7 @@ fn ensure_local_ignore(db_path: &Path) -> Result<()> {
         .with_context(|| format!("create local memory directory {}", directory.display()))?;
     let ignore = directory.join(".gitignore");
     if !ignore.exists() {
-        std::fs::write(&ignore, "*\n")
-            .with_context(|| format!("write {}", ignore.display()))?;
+        std::fs::write(&ignore, "*\n").with_context(|| format!("write {}", ignore.display()))?;
     }
     Ok(())
 }

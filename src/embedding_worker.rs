@@ -182,9 +182,7 @@ fn ensure_cache_dir(cache_dir: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        EMBEDDING_MODEL_FILES, EmbeddingRunOptions, model_is_cached,
-    };
+    use super::{EMBEDDING_MODEL_FILES, EmbeddingRunOptions, model_is_cached};
     use crate::store::{NewMemory, Store};
     use uuid::Uuid;
 
