@@ -18,9 +18,27 @@ fn main() {
         .filter(|output| output.status.success())
         .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned());
     if let Some(git_dir) = git_dir {
-        let head_file = Path::new(&git_dir).join("HEAD");
+        let git_dir = Path::new(&git_dir);
+        let head_file = git_dir.join("HEAD");
         if head_file.is_file() {
             println!("cargo:rerun-if-changed={}", head_file.display());
+            // On a branch HEAD is a symref whose content never changes as
+            // commits land, so also watch the ref it points at. Watch
+            // packed-refs too: the branch ref may be packed rather than a
+            // loose file. Detached HEAD needs no extra watch: its content
+            // is the sha itself and changes on every checkout.
+            if let Ok(head) = std::fs::read_to_string(&head_file)
+                && let Some(ref_path) = head.strip_prefix("ref:").map(str::trim)
+            {
+                let target = git_dir.join(ref_path);
+                if target.is_file() {
+                    println!("cargo:rerun-if-changed={}", target.display());
+                }
+            }
+            let packed = git_dir.join("packed-refs");
+            if packed.is_file() {
+                println!("cargo:rerun-if-changed={}", packed.display());
+            }
         }
     }
 }
