@@ -277,9 +277,23 @@ fn main() {
         return;
     };
     if let Err(error) = run(cli) {
+        if is_broken_pipe(&error) {
+            // A downstream consumer (head, jq -r, a pipeline) closed early;
+            // it already got the records it wanted. Exiting quietly here is
+            // the convention shared by seq and python.
+            process::exit(0);
+        }
         eprintln!("mem: {error:#}");
         process::exit(1);
     }
+}
+
+fn is_broken_pipe(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io_error| io_error.kind() == std::io::ErrorKind::BrokenPipe)
+    })
 }
 
 fn parse_cli(argv: &[String]) -> Option<MemCli> {

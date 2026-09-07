@@ -1,5 +1,6 @@
 //! Integration coverage for repo-local default storage.
 
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use uuid::Uuid;
@@ -301,6 +302,49 @@ fn export_records_are_stable_across_runs_and_composable_with_jq() {
     assert_eq!(
         first.stdout, second.stdout,
         "repeated exports must be diffable"
+    );
+    std::fs::remove_dir_all(cwd).unwrap();
+}
+
+#[test]
+fn export_to_early_exiting_consumer_exits_quietly() {
+    // A consumer closing the pipe after reading enough records is a normal
+    // exit, not an export failure: mem must not print a broken-pipe error or
+    // fail the pipeline. Output must exceed the pipe buffer to force EPIPE.
+    let cwd = temp_dir();
+    for index in 0..400 {
+        run(
+            &cwd,
+            &[
+                "remember",
+                &format!("padding record to exceed the pipe buffer {index}"),
+                "--source-type",
+                "test",
+            ],
+        );
+    }
+    let mut mem = command(&cwd)
+        .args(["export"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn mem");
+    let mut stdout = mem.stdout.take().expect("capture mem stdout");
+    // Read a little, then drop the pipe so the remaining export hits EPIPE.
+    let mut buffer = [0u8; 256];
+    stdout.read_exact(&mut buffer).expect("read first records");
+    drop(stdout);
+    let output = mem.wait_with_output().expect("wait for mem");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "early-exiting consumer must not fail mem; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "broken pipe must be silent; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
     std::fs::remove_dir_all(cwd).unwrap();
 }
