@@ -225,6 +225,10 @@ struct IndexCommand {
     /// Do nothing when the embedding model is not already cached locally.
     #[usage(long)]
     cached_only: bool,
+
+    /// Invalidate current-model vectors first; continue remaining batches without this flag.
+    #[usage(long)]
+    rebuild: bool,
 }
 
 /// Write memories as NDJSON lines for ingestion by other tooling.
@@ -569,6 +573,7 @@ fn run(cli: MemCli) -> Result<()> {
                     cache_dir,
                     show_download_progress: !cli.json,
                     cached_only: command.cached_only,
+                    rebuild: command.rebuild,
                 })?,
                 None => EmbeddingRunStats {
                     model: EMBEDDING_MODEL_ID,

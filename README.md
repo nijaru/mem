@@ -40,6 +40,7 @@ mem state clear
 
 mem index
 mem index --cached-only
+mem index --rebuild
 
 mem export
 mem export --include-superseded > memories.ndjson
@@ -65,7 +66,9 @@ Context is bounded by count and by memory-text bytes (`--max-bytes`, default 327
 
 Embeddings are rebuildable derived data. `mem index` directly selects active memories missing a vector for the current model, embeds a bounded batch, and commits each vector only if the memory is still active at the exact source version that was embedded. Failed work remains missing and a later `mem index` retries it naturally.
 
-`mem index --cached-only` never downloads the model, which makes it safe for opportunistic agent hooks.
+If semantic search reports malformed or incompatible vectors, run `mem index --rebuild` once. This invalidates only the current model’s derived vectors after model initialization succeeds, then indexes a bounded batch (`-n`, default 64). Continue with ordinary `mem index` until `remaining` is zero; repeating `--rebuild` would restart that work. Canonical memories, provenance, and continuation state are preserved. If inference fails after invalidation, ordinary indexing can resume and context falls back lexically.
+
+`mem index --cached-only` never downloads the model, which makes it safe for opportunistic agent hooks. With `--rebuild`, an absent cache skips both invalidation and indexing.
 
 ## Storage and safety
 

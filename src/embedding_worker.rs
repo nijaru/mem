@@ -16,6 +16,7 @@ pub struct EmbeddingRunOptions {
     pub cache_dir: PathBuf,
     pub show_download_progress: bool,
     pub cached_only: bool,
+    pub rebuild: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -44,20 +45,30 @@ impl Store {
             stale: 0,
             remaining: coverage.unindexed,
         };
-        if coverage.unindexed == 0 {
+        if coverage.unindexed == 0 && (!options.rebuild || coverage.indexed == 0) {
             return Ok(stats);
         }
         if options.cached_only && !model_is_cached(&options.cache_dir) {
             return Ok(stats);
         }
 
+        ensure_cache_dir(&options.cache_dir)?;
+        let mut model = load_model(&options.cache_dir, options.show_download_progress)?;
+        if options.rebuild {
+            // A single atomic invalidation makes every active memory pending.
+            // Do this only after model initialization succeeds. If embedding
+            // later fails, ordinary indexing resumes and recall stays lexical.
+            self.connection.execute(
+                "DELETE FROM embeddings WHERE model = ?1",
+                [EMBEDDING_MODEL_ID],
+            )?;
+        }
         let sources = self.pending_embedding_sources(EMBEDDING_MODEL_ID, options.limit)?;
         if sources.is_empty() {
+            stats.remaining = self.embedding_coverage(EMBEDDING_MODEL_ID)?.unindexed;
             return Ok(stats);
         }
 
-        ensure_cache_dir(&options.cache_dir)?;
-        let mut model = load_model(&options.cache_dir, options.show_download_progress)?;
         let texts: Vec<&str> = sources.iter().map(|source| source.text.as_str()).collect();
         let embeddings = model
             .embed(texts, Some(sources.len()))
@@ -219,12 +230,79 @@ mod tests {
                 cache_dir: cache.clone(),
                 show_download_progress: false,
                 cached_only: true,
+                rebuild: false,
             })
             .expect("index");
         assert_eq!(stats.indexed, 0);
         assert_eq!(stats.remaining, 1);
         assert!(!cache.exists());
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn rebuild_preserves_vectors_when_cache_is_absent_or_initialization_fails() {
+        let path = std::env::temp_dir().join(format!("mem-rebuild-test-{}.db", Uuid::now_v7()));
+        let mut store = Store::open(&path).unwrap();
+        let memory = store
+            .remember(NewMemory {
+                text: "canonical text".to_owned(),
+                kind: "fact".to_owned(),
+                actor: "agent".to_owned(),
+                source_type: "test".to_owned(),
+                source_ref: None,
+            })
+            .unwrap();
+        Store::upsert_embedding_if_current(
+            &store.connection,
+            &memory.id,
+            memory.updated_at,
+            super::EMBEDDING_MODEL_ID,
+            &[1.0, 0.0],
+        )
+        .unwrap();
+        let cache = std::env::temp_dir().join(format!("mem-rebuild-cache-{}", Uuid::now_v7()));
+        let result = store
+            .run_embedding_index(EmbeddingRunOptions {
+                limit: 1,
+                cache_dir: cache.clone(),
+                show_download_progress: false,
+                cached_only: true,
+                rebuild: true,
+            })
+            .unwrap();
+        assert_eq!(result.indexed, 0);
+        assert_eq!(result.remaining, 0);
+        assert!(!cache.exists());
+        assert_eq!(
+            store
+                .embedding_coverage(super::EMBEDDING_MODEL_ID)
+                .unwrap()
+                .indexed,
+            1
+        );
+        std::fs::write(&cache, "not a cache directory").unwrap();
+        assert!(
+            store
+                .run_embedding_index(EmbeddingRunOptions {
+                    limit: 1,
+                    cache_dir: cache.clone(),
+                    show_download_progress: false,
+                    cached_only: false,
+                    rebuild: true,
+                })
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .embedding_coverage(super::EMBEDDING_MODEL_ID)
+                .unwrap()
+                .indexed,
+            1
+        );
+        assert_eq!(store.get(&memory.id).unwrap().text, "canonical text");
+        drop(store);
+        std::fs::remove_file(cache).unwrap();
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

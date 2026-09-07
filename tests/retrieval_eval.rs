@@ -342,3 +342,50 @@ fn cleanup(path: &Path) {
         let _ = std::fs::remove_file(path);
     }
 }
+
+#[test]
+#[ignore = "loads the cached embedding model; intended for the retrieval-eval workflow"]
+fn rebuild_repairs_malformed_vectors_in_bounded_batches() {
+    let db = test_path();
+    let first = remember_text(&db, "Release checks protect canonical memory storage.");
+    remember_text(
+        &db,
+        "Rebuilt vectors restore semantic search after corruption.",
+    );
+    run_json(&db, &["state", "set", "--goal", "preserve canonical state"]);
+    run_json(&db, &["index"]);
+    let memories_before = run_json(&db, &["get", &first]);
+    let state_before = run_json(&db, &["state", "show"]);
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    connection
+        .execute("UPDATE embeddings SET vector = X'00'", [])
+        .unwrap();
+    // Other-model derived state is not owned by this rebuild.
+    connection.execute("INSERT INTO embeddings SELECT memory_id, 'other-model', dimensions, vector, source_updated_at, updated_at FROM embeddings", []).unwrap();
+    assert_eq!(run_json(&db, &["index"])["indexed"], 0);
+    assert!(context_ids(&db, "canonical memory storage").contains(&first));
+
+    let batch = run_json(&db, &["index", "--rebuild", "--cached-only", "-n", "1"]);
+    assert_eq!(batch["indexed"], 1);
+    assert_eq!(batch["remaining"], 1);
+    assert_eq!(run_json(&db, &["get", &first]), memories_before);
+    assert_eq!(run_json(&db, &["state", "show"]), state_before);
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM embeddings WHERE model = 'other-model'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        2
+    );
+
+    let finished = run_json(&db, &["index", "--cached-only"]);
+    assert_eq!(finished["indexed"], 1);
+    assert_eq!(finished["remaining"], 0);
+    assert!(semantic_ids(&db, "canonical memory storage").contains(&first));
+    assert_eq!(run_json(&db, &["index"])["indexed"], 0);
+    drop(connection);
+    cleanup(&db);
+}
