@@ -24,9 +24,9 @@ user closes it. Nothing in this file has been run against the real registry.
 ## Steps (exact, in order)
 
 1. Confirm the qualification window is closed: user says so, no open dogfood
-   defects, and the `.tasks/mem-r8l2.json` task-log churn is either committed
-   or explicitly left out of the release commit. (2026-09-07: the r8l2 task is
-   `done`; only its log entries keep moving — commit as chore or leave out.)
+   defects, and no unexpected `.tasks/` drift in `git status` (the three
+   `.tasks/` files are tracked from before the ignore rule; `mem-r8l2.json`
+   is `done` as of 2026-09-05).
 2. Version is `0.0.1` (resolved above — no bump commit needed). The release
    commit is just the tag (open question 3 kept the README as-is):
    - tag `v0.0.1` (annotated, message = one-line summary of what v0.0.1 is).
