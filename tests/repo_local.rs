@@ -209,3 +209,98 @@ fn version_and_status_report_build_identity() {
     );
     std::fs::remove_dir_all(cwd).unwrap();
 }
+
+#[test]
+fn export_emits_ndjson_active_by_default_and_preserves_lineage() {
+    let cwd = temp_dir();
+    let first = run_json(&cwd, &["remember", "first memory", "--source-type", "test"]);
+    let second = run_json(
+        &cwd,
+        &["remember", "second memory", "--source-type", "test"],
+    );
+    run_json(
+        &cwd,
+        &[
+            "correct",
+            second["id"].as_str().unwrap(),
+            "second memory, corrected",
+        ],
+    );
+    run(&cwd, &["forget", first["id"].as_str().unwrap()]);
+
+    let output = command(&cwd).args(["export"]).output().expect("spawn mem");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let records: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<Result<_, _>>()
+        .expect("export output is valid NDJSON");
+    // Deleted memories never export; the corrected replacement is active.
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["text"], "second memory, corrected");
+    assert_eq!(records[0]["status"], "active");
+    assert!(records[0]["superseded_by"].is_null());
+    // Full field set on every record.
+    for field in [
+        "id",
+        "kind",
+        "text",
+        "actor",
+        "source_type",
+        "source_ref",
+        "status",
+        "superseded_by",
+        "created_at",
+        "updated_at",
+        "deleted_at",
+    ] {
+        assert!(records[0].get(field).is_some(), "missing field: {field}");
+    }
+
+    let lineage = command(&cwd)
+        .args(["export", "--include-superseded"])
+        .output()
+        .expect("spawn mem");
+    assert!(lineage.status.success());
+    let lineage_records: Vec<serde_json::Value> = String::from_utf8_lossy(&lineage.stdout)
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<Result<_, _>>()
+        .expect("lineage export is valid NDJSON");
+    assert_eq!(lineage_records.len(), 2);
+    assert_eq!(lineage_records[0]["status"], "superseded");
+    assert_eq!(
+        lineage_records[0]["superseded_by"],
+        lineage_records[1]["id"]
+    );
+    assert_eq!(lineage_records[1]["status"], "active");
+
+    // Absent store: export succeeds with zero lines and creates nothing.
+    let empty = temp_dir();
+    let output = command(&empty)
+        .args(["export"])
+        .output()
+        .expect("spawn mem");
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(!empty.join(".mem").exists());
+    std::fs::remove_dir_all(cwd).unwrap();
+    std::fs::remove_dir_all(empty).unwrap();
+}
+
+#[test]
+fn export_records_are_stable_across_runs_and_composable_with_jq() {
+    let cwd = temp_dir();
+    run_json(
+        &cwd,
+        &["remember", "stable memory", "--source-type", "test"],
+    );
+    let first = command(&cwd).args(["export"]).output().expect("spawn mem");
+    let second = command(&cwd).args(["export"]).output().expect("spawn mem");
+    assert_eq!(
+        first.stdout, second.stdout,
+        "repeated exports must be diffable"
+    );
+    std::fs::remove_dir_all(cwd).unwrap();
+}

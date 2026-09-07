@@ -40,9 +40,14 @@ mem state clear
 
 mem index
 mem index --cached-only
+
+mem export
+mem export --include-superseded > memories.ndjson
 ```
 
 `get` reads any record including superseded ones; `correct` and `forget` operate only on active memories, so supersession lineage stays immutable. `mem --version` and `status` report the commit the binary was built from, so a stale installed binary is detectable.
+
+`mem export` writes the store as NDJSON (one full record per line, ordered by creation) to stdout — a read-only derived view for ingestion into other tooling (`jq`, DuckDB, pipelines). The default scope is active memories only; `--include-superseded` adds correction lineage so superseded records stay distinguishable from current knowledge. Deleted memories are never exported, and continuation state and embeddings are not included (both are rebuildable or workspace-local).
 
 `remember` and `state set` initialize the repo-local store automatically; `init` is the explicit setup command. `.mem/` is ignored by Git by default. `--db /path/to/file.db` and `MEM_DB` pin an exact database for tests or isolated profiles.
 

@@ -255,6 +255,21 @@ impl Store {
         self.search_fts(&crate::id_resolve::fts_query(query)?, limit)
     }
 
+    /// Export memories as a deterministic, diffable snapshot. Default scope
+    /// is active memories; `include_superseded` adds correction lineage.
+    /// Deleted memories are never exported: retirement must survive export.
+    pub fn export_memories(&self, include_superseded: bool) -> Result<Vec<Memory>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, kind, text, actor, source_type, source_ref, status, superseded_by,
+                    created_at, updated_at, deleted_at
+             FROM memories
+             WHERE status = 'active' OR (?1 AND status = 'superseded')
+             ORDER BY created_at, id",
+        )?;
+        let rows = statement.query_map([include_superseded], memory_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     pub fn get(&self, id_or_prefix: &str) -> Result<Memory> {
         let id = self.resolve_memory_id(id_or_prefix)?;
         self.memory_by_id(&id)
@@ -774,6 +789,47 @@ mod tests {
                 .expect("read")
                 .is_none()
         );
+        cleanup(&path);
+    }
+
+    #[test]
+    fn export_excludes_deleted_and_scopes_superseded_explicitly() {
+        let path = test_path();
+        let mut store = Store::open(&path).expect("open");
+        let first = remember(&store, "first statement");
+        let second = remember(&store, "second statement");
+        let result = store
+            .correct(
+                &second.id,
+                NewCorrection {
+                    text: "second statement, corrected".to_owned(),
+                    kind: None,
+                    actor: "agent".to_owned(),
+                    source_type: "test".to_owned(),
+                    source_ref: None,
+                },
+            )
+            .expect("correct");
+        store.forget(&first.id).expect("forget");
+
+        let active = store.export_memories(false).expect("export active");
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].text, "second statement, corrected");
+        assert_eq!(active[0].status, "active");
+
+        let full = store.export_memories(true).expect("export with lineage");
+        assert_eq!(full.len(), 2);
+        assert_eq!(full[0].text, "second statement");
+        assert_eq!(full[0].status, "superseded");
+        assert_eq!(
+            full[0].superseded_by.as_deref(),
+            Some(result.replacement.id.as_str())
+        );
+        assert_eq!(full[1].text, "second statement, corrected");
+        // The forgotten memory must not appear in any export scope.
+        assert!(full.iter().all(|memory| memory.id != first.id));
+        // Deterministic ordering: created_at, then id.
+        assert!(full[0].created_at <= full[1].created_at);
         cleanup(&path);
     }
 

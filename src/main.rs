@@ -48,6 +48,7 @@ enum Command {
     Get(Get),
     Forget(Forget),
     Index(IndexCommand),
+    Export(Export),
 }
 
 /// Initialize the repo-local memory store.
@@ -223,6 +224,15 @@ struct IndexCommand {
     /// Do nothing when the embedding model is not already cached locally.
     #[usage(long)]
     cached_only: bool,
+}
+
+/// Write memories as NDJSON lines for ingestion by other tooling.
+/// Read-only derived view; embeddings and deleted memories are not included.
+#[derive(Args)]
+struct Export {
+    /// Include superseded memories (correction lineage), not just active ones.
+    #[usage(long)]
+    include_superseded: bool,
 }
 
 #[derive(Serialize)]
@@ -536,6 +546,13 @@ fn run(cli: MemCli) -> Result<()> {
                 println!("remaining: {}", stats.remaining);
             }
         }
+        Command::Export(command) => {
+            let memories = match Store::open_existing(&db_path)? {
+                Some(store) => store.export_memories(command.include_superseded)?,
+                None => Vec::new(),
+            };
+            print_ndjson(&memories)?;
+        }
     }
     Ok(())
 }
@@ -745,6 +762,18 @@ fn print_json(value: &impl Serialize) -> Result<()> {
     serde_json::to_writer_pretty(&mut lock, value)?;
     use std::io::Write as _;
     writeln!(lock)?;
+    Ok(())
+}
+
+fn print_ndjson(value: &[Memory]) -> Result<()> {
+    use std::io::Write as _;
+    let stdout = std::io::stdout();
+    let mut lock = stdout.lock();
+    for memory in value {
+        serde_json::to_writer(&mut lock, memory).context("encode export record")?;
+        lock.write_all(b"\n")
+            .context("write export record separator")?;
+    }
     Ok(())
 }
 
