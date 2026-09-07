@@ -11,13 +11,14 @@ user closes it. Nothing in this file has been run against the real registry.
 - [x] Package excludes: `.github`, `.tasks`, `ai`, `scripts`, `tests` (verified in tarball list); `AGENTS.md` ships in the tarball (acceptable — repo instructions), consider whether to also exclude it at release time.
 - [x] `Cargo.lock` tracked (binary-crate convention); `rust-toolchain.toml` ships (pins 1.98 for installers).
 - [x] Installed binary matches HEAD (`mem --version` = 506408cfaa4c at time of writing).
-- [x] No git tags exist yet — `v0.1.0` will be the first.
+- [x] No git tags exist yet — `v0.0.1` will be the first.
+- [x] Qualification evidence 2026-09-07: skill `NOTES.md` field log is empty after real dogfood — 9 project stores live, 63 memories, 5 corrections exercised, zero filed friction.
 
 ## Open questions for the user at release time
 
-1. Version: `0.1.0` is the conventional first-stable. Package stays `mem-cli`, binary stays `mem`.
+1. **Resolved 2026-09-07:** version is `0.0.1` — unreleased, no reason to jump to 0.x.0. `Cargo.toml` already carries it; no version-bump commit is needed.
 2. `rust-version = 1.98` — pinned toolchain also ships in the tarball. Fine, or relax to MSRV wording?
-3. Docs say "pre-1.0 interfaces may change" — keep that stance through 0.1.0, or treat 0.1.0 as the soft freeze?
+3. Docs say "pre-1.0 interfaces may change" — keep that stance through 0.0.1, or treat it as a soft freeze?
 4. Homebrew tap formula (`~/github/nijaru/homebrew-tap`) — add at release or after some soak time on crates.io?
 
 ## Steps (exact, in order)
@@ -26,19 +27,18 @@ user closes it. Nothing in this file has been run against the real registry.
    defects, and the `.tasks/mem-r8l2.json` task-log churn is either committed
    or explicitly left out of the release commit. (2026-09-07: the r8l2 task is
    `done`; only its log entries keep moving — commit as chore or leave out.)
-2. Pick the version, then in one commit:
-   - `Cargo.toml`: `version = "0.1.0"`;
-   - `README.md`: drop "pre-1.0" wording per decision above;
-   - tag `v0.1.0` (annotated, message = one-line summary of what v0.1.0 is).
-3. Full gates on the bumped commit, then:
-   `cargo publish --dry-run` (must be clean at the new version).
-4. Reinstall locally from source, confirm `mem --version` reports `0.1.0 (built from <head>)`.
+2. Version is `0.0.1` (resolved above — no bump commit needed). In one commit:
+   - `README.md`: drop "pre-1.0" wording per decision on open question 3;
+   - tag `v0.0.1` (annotated, message = one-line summary of what v0.0.1 is).
+3. Full gates on the tag commit, then:
+   `cargo publish --dry-run` (must be clean at `0.0.1`).
+4. Reinstall locally from source, confirm `mem --version` reports `0.0.1 (built from <head>)`.
 5. `cargo publish` (real). Requires a login token in `~/.cargo/credentials` —
    check `cargo login --help` state first; the user must provide the token if absent.
    Publishing is irreversible: name + version are permanently claimed.
 6. Post-publish checks:
    - `cargo install mem-cli` from the public index into a scratch `CARGO_HOME`
-     (not the real one) and smoke-test `mem init/status/remember/context` in a
+     (not the real one) and smoke-test `mem init/status/remember/context/export` in a
      temp repo — this catches what dry-run cannot (registry-side rendering).
    - Verify https://crates.io/crates/mem-cli renders, docs.rs builds.
 7. Tag is already pushed; push the version-bump commit if not already.
