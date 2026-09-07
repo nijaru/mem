@@ -10,44 +10,31 @@ fn main() {
         .or_else(env_commit)
         .unwrap_or_else(|| "unknown".to_owned());
     println!("cargo:rustc-env=MEM_BUILD_COMMIT={identity}");
-    // Re-run only when the HEAD ref moves, not on every rebuild.
-    let git_dir = Command::new("git")
-        .args(["rev-parse", "--git-dir"])
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned());
-    if let Some(git_dir) = git_dir {
-        let git_dir = Path::new(&git_dir);
-        let head_file = git_dir.join("HEAD");
-        if head_file.is_file() {
-            println!("cargo:rerun-if-changed={}", head_file.display());
-            // On a branch HEAD is a symref whose content never changes as
-            // commits land, so also watch the ref it points at. Watch
-            // packed-refs too: the branch ref may be packed rather than a
-            // loose file. Detached HEAD needs no extra watch: its content
-            // is the sha itself and changes on every checkout.
-            if let Ok(head) = std::fs::read_to_string(&head_file)
-                && let Some(ref_path) = head.strip_prefix("ref:").map(str::trim)
-            {
-                let target = git_dir.join(ref_path);
-                if target.is_file() {
-                    println!("cargo:rerun-if-changed={}", target.display());
-                }
-            }
-            let packed = git_dir.join("packed-refs");
-            if packed.is_file() {
-                println!("cargo:rerun-if-changed={}", packed.display());
-            }
+    println!("cargo:rerun-if-env-changed=MEM_BUILD_COMMIT");
+    // Git resolves shared refs correctly for both normal and linked worktrees.
+    watch_git_path("HEAD");
+    watch_git_path("packed-refs");
+    if let Some(reference) = git_output(&["symbolic-ref", "--quiet", "HEAD"]) {
+        watch_git_path(&reference);
+    }
+}
+
+fn watch_git_path(name: &str) {
+    if let Some(path) = git_output(&["rev-parse", "--git-path", name]) {
+        // Watch the containing directory until an absent ref is created.
+        // Watching a missing file directly would make Cargo rebuild every time.
+        if let Some(existing) = Path::new(&path).ancestors().find(|path| path.exists()) {
+            println!("cargo:rerun-if-changed={}", existing.display());
         }
     }
 }
 
 fn git_head() -> Option<String> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--short=12", "HEAD"])
-        .output()
-        .ok()?;
+    git_output(&["rev-parse", "--short=12", "HEAD"])
+}
+
+fn git_output(args: &[&str]) -> Option<String> {
+    let output = Command::new("git").args(args).output().ok()?;
     if !output.status.success() {
         return None;
     }

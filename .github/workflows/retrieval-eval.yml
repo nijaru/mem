@@ -16,6 +16,7 @@ on:
       - src/embedding_worker.rs
       - src/id_resolve.rs
       - src/main.rs
+      - src/recall.rs
       - src/store.rs
       - src/vector_search.rs
       - src/workspace.rs

@@ -3,7 +3,7 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, TransactionBehavior, params};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -132,10 +132,14 @@ impl Store {
     }
 
     pub fn open_existing(path: &Path) -> Result<Option<Self>> {
-        if !path.is_file() {
-            return Ok(None);
+        match fs::metadata(path) {
+            Ok(metadata) if metadata.is_file() => {}
+            Ok(_) => bail!("memory store is not a regular file: {}", path.display()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error).context("inspect existing memory store"),
         }
-        let connection = Connection::open(path)?;
+        // Never recreate a store removed between metadata inspection and open.
+        let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
         let store = Self::connect(connection)?;
         store.migrate()?;
         Ok(Some(store))
@@ -339,13 +343,6 @@ impl Store {
         if !has_value && input.clear_fields.is_empty() {
             bail!("state set requires at least one field to set or clear");
         }
-        if !has_value
-            && self.workspace_state(&input.workspace)?.is_none()
-            && !input.clear_fields.is_empty()
-        {
-            bail!("no state for {}", input.workspace);
-        }
-
         let now = unix_millis()?;
         // Validation reads and the upsert must serialize as one unit: without
         // the transaction a concurrent `state clear` between the existence
@@ -354,6 +351,16 @@ impl Store {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if !has_value {
+            let exists: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM workspace_state WHERE workspace = ?1)",
+                [&input.workspace],
+                |row| row.get(0),
+            )?;
+            if !exists {
+                bail!("no state for {}", input.workspace);
+            }
+        }
         transaction.execute(
             "INSERT INTO workspace_state (workspace, session, goal, task, checkpoint, updated_at)\n\
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)\n\
@@ -494,7 +501,7 @@ impl Store {
                 1..=5 => bail!(
                     "database schema version {version} is from an unsupported pre-1.0 build; upgrade it to v6 with the previous mem build first"
                 ),
-                _ => unreachable!(),
+                _ => bail!("invalid database schema version {version}"),
             }
             let version = self.schema_version()?;
             if version != SCHEMA_VERSION {
@@ -655,6 +662,28 @@ mod tests {
     }
 
     #[test]
+    fn existing_store_rejects_directories_and_negative_schema_versions() {
+        let path = test_path();
+        std::fs::create_dir(&path).unwrap();
+        assert!(Store::open_existing(&path).is_err());
+        std::fs::remove_dir(&path).unwrap();
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch("PRAGMA user_version = -1")
+            .unwrap();
+        drop(connection);
+        let result = Store::open_existing(&path);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("schema version -1")
+        );
+        cleanup(&path);
+    }
+
+    #[test]
     fn correction_preserves_history_and_provenance() {
         let path = test_path();
         let mut store = Store::open(&path).expect("open");
@@ -785,6 +814,66 @@ mod tests {
         assert!(result.is_err());
         assert!(
             store
+                .workspace_state("branch:main")
+                .expect("read")
+                .is_none()
+        );
+        cleanup(&path);
+    }
+
+    #[test]
+    fn clear_only_update_observes_concurrent_delete_after_lock() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+        static WAITING: AtomicBool = AtomicBool::new(false);
+
+        let path = test_path();
+        let mut deleter = Store::open(&path).expect("open deleter");
+        deleter
+            .update_workspace_state(WorkspaceStateUpdate {
+                workspace: "branch:main".to_owned(),
+                goal: Some("ship".to_owned()),
+                ..Default::default()
+            })
+            .expect("seed");
+        let mut updater = Store::open(&path).expect("open updater");
+        updater
+            .connection
+            .busy_handler(Some(|attempt| {
+                WAITING.store(true, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(1));
+                attempt < 5000
+            }))
+            .expect("busy handler");
+        let transaction = deleter
+            .connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .expect("lock deletion");
+        transaction
+            .execute("DELETE FROM workspace_state", [])
+            .expect("delete");
+        let thread = std::thread::spawn(move || {
+            updater.update_workspace_state(WorkspaceStateUpdate {
+                workspace: "branch:main".to_owned(),
+                clear_fields: vec!["goal".to_owned()],
+                ..Default::default()
+            })
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !WAITING.load(Ordering::SeqCst) {
+            assert!(
+                Instant::now() < deadline,
+                "updater never waited for writer lock"
+            );
+            std::thread::yield_now();
+        }
+        transaction.commit().expect("commit deletion");
+        assert!(
+            thread.join().expect("join updater").is_err(),
+            "clear-only update must not resurrect deleted state"
+        );
+        assert!(
+            deleter
                 .workspace_state("branch:main")
                 .expect("read")
                 .is_none()

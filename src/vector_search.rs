@@ -36,6 +36,12 @@ impl Store {
             bail!("semantic search limit must be greater than zero");
         }
         let query = normalize_query(query_vector)?;
+        // Coverage and candidates must describe the same committed state.
+        // A deferred read snapshot does not block canonical writers in WAL mode.
+        let _snapshot = self.connection.unchecked_transaction()?;
+        if !self.has_complete_coverage(model)? {
+            bail!("semantic index is incomplete; run `mem index` first");
+        }
         let mut statement = self.connection.prepare(
             "SELECT m.id, m.kind, m.text, m.actor, m.source_type, m.source_ref,\n\
                     m.status, m.superseded_by, m.created_at, m.updated_at, m.deleted_at,\n\

@@ -1,6 +1,7 @@
 mod embedding;
 mod embedding_worker;
 mod id_resolve;
+mod recall;
 mod store;
 mod vector_search;
 mod workspace;
@@ -14,9 +15,9 @@ use serde::Serialize;
 use usage::{Args, Cli, Subcommands};
 
 use crate::embedding_worker::{
-    EMBEDDING_MODEL_ID, EmbeddingRunOptions, EmbeddingRunStats, embed_query, embed_query_if_cached,
-    model_cache_dir,
+    EMBEDDING_MODEL_ID, EmbeddingRunOptions, EmbeddingRunStats, embed_query, model_cache_dir,
 };
+use crate::recall::recall_hits;
 use crate::store::{
     Memory, NewCorrection, NewMemory, SearchHit, Store, WorkspaceState, WorkspaceStateUpdate,
 };
@@ -276,6 +277,7 @@ fn main() {
     let Some(cli) = parse_cli(&argv) else {
         return;
     };
+    let json = cli.json;
     if let Err(error) = run(cli) {
         if is_broken_pipe(&error) {
             // A downstream consumer (head, jq -r, a pipeline) closed early;
@@ -283,8 +285,21 @@ fn main() {
             // the convention shared by seq and python.
             process::exit(0);
         }
-        eprintln!("mem: {error:#}");
+        print_error(&format!("{error:#}"), 1, json);
         process::exit(1);
+    }
+}
+
+fn print_error(message: &str, exit_code: i32, json: bool) {
+    use std::io::Write as _;
+    let stderr = std::io::stderr();
+    let mut stderr = stderr.lock();
+    if json {
+        let error = serde_json::json!({"error": {"message": message, "exit_code": exit_code}});
+        let _ = serde_json::to_writer(&mut stderr, &error);
+        let _ = writeln!(stderr);
+    } else {
+        let _ = writeln!(stderr, "mem: {message}");
     }
 }
 
@@ -325,14 +340,26 @@ fn parse_cli(argv: &[String]) -> Option<MemCli> {
             None
         }
         Err(error) => {
-            eprint!("{}", usage::render_failure(MemCli::spec(), &words, &error));
+            let json = argv
+                .iter()
+                .skip(1)
+                .take_while(|word| word.as_str() != "--")
+                .any(|word| word == "--json");
+            if json {
+                print_error(
+                    &usage::render_failure_plain(MemCli::spec(), &words, &error),
+                    2,
+                    true,
+                );
+            } else {
+                eprint!("{}", usage::render_failure(MemCli::spec(), &words, &error));
+            }
             process::exit(2);
         }
     }
 }
 
 const RECALL_DEFAULT_MAX_BYTES: usize = 32 * 1024;
-const SEMANTIC_CONTEXT_MIN_SCORE: f64 = 0.55;
 
 fn run(cli: MemCli) -> Result<()> {
     let explicit_db = cli.db.is_some()
@@ -569,30 +596,6 @@ fn run(cli: MemCli) -> Result<()> {
         }
     }
     Ok(())
-}
-
-pub fn recall_hits(store: &Store, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
-    if store.has_complete_coverage(EMBEDDING_MODEL_ID)?
-        && let Some(query_vector) = cached_query_vector(query)?
-    {
-        let hits = store.semantic_search_by_vector(&query_vector, EMBEDDING_MODEL_ID, limit)?;
-        return Ok(hits
-            .into_iter()
-            .filter(|hit| hit.score >= SEMANTIC_CONTEXT_MIN_SCORE)
-            .map(|hit| SearchHit {
-                memory: hit.memory,
-                rank: hit.score,
-            })
-            .collect());
-    }
-    store.search(query, limit)
-}
-
-fn cached_query_vector(query: &str) -> Result<Option<Vec<f32>>> {
-    let Ok(cache_dir) = model_cache_dir() else {
-        return Ok(None);
-    };
-    Ok(embed_query_if_cached(query, &cache_dir).unwrap_or(None))
 }
 
 fn store_status(path: &Path, store: Option<&Store>) -> Result<StatusOutput> {

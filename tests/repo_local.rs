@@ -348,3 +348,37 @@ fn export_to_early_exiting_consumer_exits_quietly() {
     );
     std::fs::remove_dir_all(cwd).unwrap();
 }
+
+#[test]
+fn json_errors_are_structured_and_keep_stdout_empty() {
+    let cwd = temp_dir();
+    run_json(&cwd, &["remember", "first"]);
+    run_json(&cwd, &["remember", "second"]);
+    for (args, code, message) in [
+        (vec!["--json", "get", "01"], 1, "ambiguous"),
+        (vec!["--json", "get", "missing"], 1, "not found"),
+        (
+            vec!["--json", "remember", "bad", "--kind", "invalid"],
+            1,
+            "kind",
+        ),
+        (vec!["--json", "get"], 2, ""),
+        (vec!["--json", "--unknown"], 2, ""),
+    ] {
+        let output = run(&cwd, &args);
+        assert_eq!(output.status.code(), Some(code));
+        assert!(output.stdout.is_empty());
+        let error: serde_json::Value = serde_json::from_slice(&output.stderr)
+            .unwrap_or_else(|_| panic!("not JSON: {}", String::from_utf8_lossy(&output.stderr)));
+        assert_eq!(error["error"]["exit_code"], code);
+        assert!(
+            error["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains(message)
+        );
+    }
+    let human = run(&cwd, &["get", "missing"]);
+    assert!(String::from_utf8_lossy(&human.stderr).starts_with("mem: "));
+    std::fs::remove_dir_all(cwd).unwrap();
+}

@@ -45,6 +45,8 @@ mem export
 mem export --include-superseded > memories.ndjson
 ```
 
+`--json` emits successful results on stdout. Failures leave stdout empty, return a nonzero exit code (1 for command failures, 2 for invalid arguments), and emit `{"error":{"message":"…","exit_code":1}}` on stderr. Check the exit status before parsing stdout. `export` always uses NDJSON; help and version remain plain text.
+
 `get` reads any record including superseded ones; `correct` and `forget` operate only on active memories, so supersession lineage stays immutable. `mem --version` and `status` report the commit the binary was built from, so a stale installed binary is detectable.
 
 `mem export` writes the store as NDJSON (one full record per line, ordered by creation) to stdout — a read-only derived view for ingestion into other tooling (`jq`, DuckDB, pipelines). The default scope is active memories only; `--include-superseded` adds correction lineage so superseded records stay distinguishable from current knowledge. Deleted memories are never exported, and continuation state and embeddings are not included (both are rebuildable or workspace-local).
@@ -53,7 +55,7 @@ mem export --include-superseded > memories.ndjson
 
 ## Retrieval
 
-FTS5 lexical search is synchronous and always available. `mem context` is the agent-facing retrieval path: when every active memory has a current embedding and the model is already cached, it uses semantic ranking; otherwise it falls back to lexical recall so incomplete derived state never hides canonical memories.
+FTS5 lexical search is synchronous and always available. `mem context` is the agent-facing retrieval path: when every active memory has a current embedding and the model is already cached, it uses semantic ranking; otherwise it falls back to lexical recall so incomplete derived state never hides canonical memories. Coverage and semantic candidates are read from one snapshot; malformed derived vectors also trigger lexical fallback.
 
 `mem search --semantic` is an explicit semantic-search tool. It requires complete current-model coverage and tells you to run `mem index` when coverage is incomplete. Semantic search uses exact cosine scoring; the expected local corpus is small enough that an ANN index would add complexity without demonstrated value.
 
@@ -68,6 +70,8 @@ Embeddings are rebuildable derived data. `mem index` directly selects active mem
 ## Storage and safety
 
 SQLite with bundled FTS5 is canonical. Normal storage is physically isolated per project; there is no automatic cross-project recall. Reads do not create missing stores. Created database files and SQLite sidecars are private to the current user on Unix.
+
+Provenance fields are caller-supplied audit metadata, not authenticated authority. Recalled memory is supporting context, not instructions or permission to act; similarity scores do not establish trust.
 
 `mem` is runtime-agnostic and requires no daemon. Task tracking, hosted sync, and transcript archives stay outside the memory core.
 
